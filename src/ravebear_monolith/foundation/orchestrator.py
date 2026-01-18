@@ -226,6 +226,17 @@ def main(argv: list[str] | None = None) -> int:
         default=Path("config/settings.yaml"),
         help="Path to configuration file (default: config/settings.yaml)",
     )
+    parser.add_argument(
+        "--mode",
+        choices=["live", "replay"],
+        default="live",
+        help="Run mode: live (collectors) or replay (stored events)",
+    )
+    parser.add_argument(
+        "--cursor-name",
+        default="default",
+        help="Cursor name for replay mode (default: default)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -233,5 +244,17 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as e:
         print(f"FATAL: Failed to load configuration: {e}", file=sys.stderr)
         return 1
+
+    if args.mode == "replay":
+        from ravebear_monolith.core.processor import NoopProcessor
+        from ravebear_monolith.core.replay_runner import ReplayRunner
+
+        runner = ReplayRunner(
+            db_path=config.storage.db_path,
+            cursor_name=args.cursor_name,
+            processor=NoopProcessor(),
+            kill_switch_path=config.kill_switch_path,
+        )
+        return asyncio.run(runner.run())
 
     return asyncio.run(run(config))
