@@ -102,3 +102,42 @@ class ProcessorRouter(ProcessorBase):
             ok=router_result.ok,
             reason=json.dumps(router_result.model_dump()),
         )
+
+    async def finalize(self) -> RouterResult:
+        """Finalize all child processors that have finalize() method.
+
+        Runs in deterministic (sorted by name) order.
+        - FAIL_CLOSED: stop on first finalize failure
+        - BEST_EFFORT: run all, ok=True only if all succeeded
+
+        Returns:
+            RouterResult with outcomes for each processor finalized.
+        """
+        outcomes: list[ProcessorOutcome] = []
+        all_ok = True
+
+        for name in sorted(self._processors.keys()):
+            processor = self._processors[name]
+
+            if not (hasattr(processor, "finalize") and callable(processor.finalize)):
+                continue
+
+            try:
+                await processor.finalize()
+                outcome = ProcessorOutcome(name=name, ok=True)
+            except Exception as e:
+                outcome = ProcessorOutcome(
+                    name=name,
+                    ok=False,
+                    reason=f"Finalize exception: {e!r}",
+                )
+
+            outcomes.append(outcome)
+
+            if not outcome.ok:
+                all_ok = False
+                if self._policy == FailurePolicy.FAIL_CLOSED:
+                    # Stop on first failure
+                    break
+
+        return RouterResult(ok=all_ok, outcomes=outcomes)

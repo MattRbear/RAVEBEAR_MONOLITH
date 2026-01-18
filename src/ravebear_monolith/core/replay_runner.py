@@ -6,7 +6,10 @@ Replays stored events through a processor with restart-safe cursor commits.
 import logging
 from pathlib import Path
 
-from ravebear_monolith.core.processor import ProcessorBase
+from ravebear_monolith.core.processor import (
+    ProcessorBase,
+    ProcessResult,  # Added
+)
 from ravebear_monolith.core.processor_router import FailurePolicy, ProcessorRouter
 from ravebear_monolith.storage.cursor_store import CursorStore
 from ravebear_monolith.storage.event_reader import EventReader
@@ -83,20 +86,7 @@ class ReplayRunner:
         Returns:
             0 on success, 2 on FAIL_CLOSED error, 3 on BEST_EFFORT error.
         """
-        reader = EventReader(self._db_path)
-        cursors = CursorStore(self._db_path)
-
-        try:
-            await reader.connect()
-            await cursors.connect()
-
-            config = ReplayerConfig(
-                cursor_name=self._cursor_name,
-                chunk_size=self._chunk_size,
-                max_events=self._max_events,
-            )
-            replayer = EventReplayer(reader, cursors, config)
-
+        async with EventReader(self._db_path) as reader, CursorStore(self._db_path) as cursors:
             log_event(
                 logger,
                 logging.INFO,
@@ -105,32 +95,37 @@ class ReplayRunner:
                 cursor_name=self._cursor_name,
             )
 
+            # Get starting point for logging
+            if self._cursor_name:
+                cursor = await cursors.get(self._cursor_name)
+                if cursor:
+                    log_event(
+                        logger,
+                        logging.INFO,
+                        f"Resuming from cursor {self._cursor_name} @ {cursor.last_ts_ms}",
+                        event="replay_resume",
+                        cursor_name=self._cursor_name,
+                        last_ts_ms=cursor.last_ts_ms,
+                    )
+
+            # Replayer orchestration
+            config = ReplayerConfig(
+                cursor_name=self._cursor_name,
+                chunk_size=self._chunk_size,
+                max_events=self._max_events,
+            )
+            replayer = EventReplayer(reader, cursors, config)
+
             async for event in replayer.iter_events():
+                # Loop control handled by replayer (cursor, max_events)
+
                 try:
                     result = await self._processor.process(event)
                 except Exception as e:
-                    # Exception in processor
-                    log_event(
-                        logger,
-                        logging.ERROR,
-                        f"Processor exception: {e}",
-                        event="processor_exception",
-                        event_id=event.id,
-                        event_ts_ms=event.ts_ms,
-                        error=str(e),
-                    )
-                    if self._policy == FailurePolicy.FAIL_CLOSED:
-                        _trigger_kill_switch(
-                            self._kill_switch_path,
-                            f"Processor exception on event {event.id}: {e}",
-                        )
-                        return 2
-                    else:
-                        # BEST_EFFORT: no kill switch, exit 3
-                        return 3
+                    # Convert unhandled exception to failed result
+                    result = ProcessResult(ok=False, reason=f"Exception: {e}")
 
                 if not result.ok:
-                    # Processor returned failure
                     log_event(
                         logger,
                         logging.ERROR,
@@ -143,11 +138,13 @@ class ReplayRunner:
                     if self._policy == FailurePolicy.FAIL_CLOSED:
                         _trigger_kill_switch(
                             self._kill_switch_path,
-                            f"Processor failed on event {event.id}: {result.reason}",
+                            f"Processor failed: {result.reason}",
                         )
+                        await self._finalize_processor()
                         return 2
                     else:
-                        # BEST_EFFORT: no kill switch, exit 3, no cursor commit
+                        # BEST_EFFORT: no kill switch, exit 3
+                        await self._finalize_processor()
                         return 3
 
                 # Commit cursor ONLY after successful processing
@@ -168,8 +165,10 @@ class ReplayRunner:
                             self._kill_switch_path,
                             f"Cursor commit failed: {e}",
                         )
+                        await self._finalize_processor()
                         return 2
                     else:
+                        await self._finalize_processor()
                         return 3
 
             log_event(
@@ -179,8 +178,55 @@ class ReplayRunner:
                 event="replay_runner_complete",
                 processed_count=self._processed_count,
             )
+
+            # Call processor finalize() if it has one
+            exit_code = await self._finalize_processor()
+            if exit_code != 0:
+                return exit_code
+
             return 0
 
-        finally:
-            await cursors.close()
-            await reader.close()
+    async def _finalize_processor(self) -> int:
+        """Call processor finalize() if it exists.
+
+        Returns:
+            0 on success, 2/3 on error (policy-dependent).
+        """
+        if hasattr(self._processor, "finalize") and callable(self._processor.finalize):
+            try:
+                result = await self._processor.finalize()
+                # Check if finalize returned a result with ok=False
+                if result is not None and hasattr(result, "ok") and not result.ok:
+                    reason = getattr(result, "outcomes", [])
+                    log_event(
+                        logger,
+                        logging.ERROR,
+                        f"Processor finalize failed: {reason}",
+                        event="processor_finalize_failed",
+                        outcomes=str(reason),
+                    )
+                    if self._policy == FailurePolicy.FAIL_CLOSED:
+                        _trigger_kill_switch(
+                            self._kill_switch_path,
+                            f"Processor finalize failed: {reason}",
+                        )
+                        return 2
+                    else:
+                        return 3
+            except Exception as e:
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    f"Processor finalize exception: {e}",
+                    event="processor_finalize_exception",
+                    error=str(e),
+                )
+                if self._policy == FailurePolicy.FAIL_CLOSED:
+                    _trigger_kill_switch(
+                        self._kill_switch_path,
+                        f"Processor finalize failed: {e}",
+                    )
+                    return 2
+                else:
+                    return 3
+        return 0

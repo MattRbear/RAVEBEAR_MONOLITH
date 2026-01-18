@@ -39,50 +39,54 @@ class EventSink:
         self._conn = await aiosqlite.connect(str(self._db_path))
         self._conn.row_factory = aiosqlite.Row
 
-        # Enable WAL mode for better concurrency
-        await self._conn.execute("PRAGMA journal_mode=WAL")
-        await self._conn.execute("PRAGMA synchronous=NORMAL")
+        try:
+            # Enable WAL mode for better concurrency
+            await self._conn.execute("PRAGMA journal_mode=WAL")
+            await self._conn.execute("PRAGMA synchronous=NORMAL")
 
-        # Create events table (append-only)
-        await self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS events (
-                id TEXT PRIMARY KEY,
-                ts INTEGER NOT NULL,
-                source TEXT NOT NULL,
-                type TEXT NOT NULL,
-                payload_json TEXT NOT NULL,
-                content_hash TEXT NOT NULL
+            # Create events table (append-only)
+            await self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS events (
+                    id TEXT PRIMARY KEY,
+                    ts INTEGER NOT NULL,
+                    source TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    content_hash TEXT NOT NULL
+                )
+            """)
+
+            # Create replay_cursors table for restart-safe processing
+            await self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS replay_cursors (
+                    name TEXT PRIMARY KEY,
+                    last_ts_ms INTEGER NOT NULL,
+                    last_event_id TEXT NOT NULL,
+                    updated_ts_ms INTEGER NOT NULL
+                )
+            """)
+
+            # Create indexes for common queries
+            await self._conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_events_source_type
+                ON events (source, type)
+            """)
+            await self._conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_events_ts ON events (ts)
+            """)
+
+            await self._conn.commit()
+
+            log_event(
+                logger,
+                logging.INFO,
+                f"Event sink opened: {self._db_path}",
+                event="event_sink_opened",
+                db_path=str(self._db_path),
             )
-        """)
-
-        # Create replay_cursors table for restart-safe processing
-        await self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS replay_cursors (
-                name TEXT PRIMARY KEY,
-                last_ts_ms INTEGER NOT NULL,
-                last_event_id TEXT NOT NULL,
-                updated_ts_ms INTEGER NOT NULL
-            )
-        """)
-
-        # Create indexes for common queries
-        await self._conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_events_source_type
-            ON events (source, type)
-        """)
-        await self._conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_events_ts ON events (ts)
-        """)
-
-        await self._conn.commit()
-
-        log_event(
-            logger,
-            logging.INFO,
-            f"Event sink opened: {self._db_path}",
-            event="event_sink_opened",
-            db_path=str(self._db_path),
-        )
+        except Exception:
+            await self.close()
+            raise
 
     async def close(self) -> None:
         """Close database connection."""
@@ -95,6 +99,15 @@ class EventSink:
                 "Event sink closed",
                 event="event_sink_closed",
             )
+
+    async def __aenter__(self) -> "EventSink":
+        """Async context manager entry."""
+        await self.open()
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Async context manager exit."""
+        await self.close()
 
     async def write(self, event: CollectorEvent) -> None:
         """Write event to database, ignoring duplicates.
@@ -136,10 +149,10 @@ class EventSink:
         if not self._conn:
             raise RuntimeError("Event sink not open")
 
-        cursor = await self._conn.execute(
+        async with self._conn.execute(
             "SELECT id, ts, source, type, payload_json FROM events ORDER BY ts"
-        )
-        rows = await cursor.fetchall()
+        ) as cursor:
+            rows = await cursor.fetchall()
 
         return [
             {
@@ -157,8 +170,8 @@ class EventSink:
         if not self._conn:
             raise RuntimeError("Event sink not open")
 
-        cursor = await self._conn.execute("SELECT COUNT(*) FROM events")
-        row = await cursor.fetchone()
+        async with self._conn.execute("SELECT COUNT(*) FROM events") as cursor:
+            row = await cursor.fetchone()
         return row[0] if row else 0
 
     @staticmethod

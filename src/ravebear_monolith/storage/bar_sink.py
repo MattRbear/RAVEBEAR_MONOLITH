@@ -47,39 +47,43 @@ class BarSink:
         self._conn = await aiosqlite.connect(str(self._db_path))
         self._conn.row_factory = aiosqlite.Row
 
-        # Enable WAL mode
-        await self._conn.execute("PRAGMA journal_mode=WAL")
-        await self._conn.execute("PRAGMA synchronous=NORMAL")
+        try:
+            # Enable WAL mode
+            await self._conn.execute("PRAGMA journal_mode=WAL")
+            await self._conn.execute("PRAGMA synchronous=NORMAL")
 
-        # Create bars_1s table
-        await self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS bars_1s (
-                symbol TEXT NOT NULL,
-                ts_ms INTEGER NOT NULL,
-                open REAL NOT NULL,
-                high REAL NOT NULL,
-                low REAL NOT NULL,
-                close REAL NOT NULL,
-                volume REAL NOT NULL,
-                trade_count INTEGER NOT NULL,
-                PRIMARY KEY (symbol, ts_ms)
+            # Create bars_1s table
+            await self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS bars_1s (
+                    symbol TEXT NOT NULL,
+                    ts_ms INTEGER NOT NULL,
+                    open REAL NOT NULL,
+                    high REAL NOT NULL,
+                    low REAL NOT NULL,
+                    close REAL NOT NULL,
+                    volume REAL NOT NULL,
+                    trade_count INTEGER NOT NULL,
+                    PRIMARY KEY (symbol, ts_ms)
+                )
+            """)
+
+            # Index for time-based queries
+            await self._conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_bars_1s_ts ON bars_1s (ts_ms)
+            """)
+
+            await self._conn.commit()
+
+            log_event(
+                logger,
+                logging.INFO,
+                f"Bar sink opened: {self._db_path}",
+                event="bar_sink_opened",
+                db_path=str(self._db_path),
             )
-        """)
-
-        # Index for time-based queries
-        await self._conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_bars_1s_ts ON bars_1s (ts_ms)
-        """)
-
-        await self._conn.commit()
-
-        log_event(
-            logger,
-            logging.INFO,
-            f"Bar sink opened: {self._db_path}",
-            event="bar_sink_opened",
-            db_path=str(self._db_path),
-        )
+        except Exception:
+            await self.close()
+            raise
 
     async def close(self) -> None:
         """Close database connection."""
@@ -87,6 +91,15 @@ class BarSink:
             await self._conn.close()
             self._conn = None
             log_event(logger, logging.INFO, "Bar sink closed", event="bar_sink_closed")
+
+    async def __aenter__(self) -> "BarSink":
+        """Async context manager entry."""
+        await self.open()
+        return self
+
+    async def __aexit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+        """Async context manager exit."""
+        await self.close()
 
     async def upsert_bar(self, bar: Bar1s) -> None:
         """Insert or update bar with merge semantics.
@@ -144,11 +157,11 @@ class BarSink:
         if not self._conn:
             raise RuntimeError("Bar sink not open")
 
-        cursor = await self._conn.execute(
+        async with self._conn.execute(
             "SELECT * FROM bars_1s WHERE symbol = ? AND ts_ms = ?",
             (symbol, ts_ms),
-        )
-        row = await cursor.fetchone()
+        ) as cursor:
+            row = await cursor.fetchone()
 
         if row is None:
             return None
@@ -170,13 +183,14 @@ class BarSink:
             raise RuntimeError("Bar sink not open")
 
         if symbol:
-            cursor = await self._conn.execute(
+            async with self._conn.execute(
                 "SELECT COUNT(*) FROM bars_1s WHERE symbol = ?", (symbol,)
-            )
+            ) as cursor:
+                row = await cursor.fetchone()
         else:
-            cursor = await self._conn.execute("SELECT COUNT(*) FROM bars_1s")
+            async with self._conn.execute("SELECT COUNT(*) FROM bars_1s") as cursor:
+                row = await cursor.fetchone()
 
-        row = await cursor.fetchone()
         return row[0] if row else 0
 
     async def get_all_bars(self, symbol: str | None = None) -> list[Bar1s]:
@@ -185,14 +199,15 @@ class BarSink:
             raise RuntimeError("Bar sink not open")
 
         if symbol:
-            cursor = await self._conn.execute(
+            async with self._conn.execute(
                 "SELECT * FROM bars_1s WHERE symbol = ? ORDER BY ts_ms",
                 (symbol,),
-            )
+            ) as cursor:
+                rows = await cursor.fetchall()
         else:
-            cursor = await self._conn.execute("SELECT * FROM bars_1s ORDER BY symbol, ts_ms")
+            async with self._conn.execute("SELECT * FROM bars_1s ORDER BY symbol, ts_ms") as cursor:
+                rows = await cursor.fetchall()
 
-        rows = await cursor.fetchall()
         return [
             Bar1s(
                 symbol=row["symbol"],

@@ -37,22 +37,35 @@ class CursorStore:
         self._conn = await aiosqlite.connect(str(self._db_path))
         self._conn.row_factory = aiosqlite.Row
 
-        # Ensure table exists (same schema as EventSink creates)
-        await self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS replay_cursors (
-                name TEXT PRIMARY KEY,
-                last_ts_ms INTEGER NOT NULL,
-                last_event_id TEXT NOT NULL,
-                updated_ts_ms INTEGER NOT NULL
-            )
-        """)
-        await self._conn.commit()
+        try:
+            # Ensure table exists (same schema as EventSink creates)
+            await self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS replay_cursors (
+                    name TEXT PRIMARY KEY,
+                    last_ts_ms INTEGER NOT NULL,
+                    last_event_id TEXT NOT NULL,
+                    updated_ts_ms INTEGER NOT NULL
+                )
+            """)
+            await self._conn.commit()
+        except Exception:
+            await self.close()
+            raise
 
     async def close(self) -> None:
         """Close database connection."""
         if self._conn:
             await self._conn.close()
             self._conn = None
+
+    async def __aenter__(self) -> "CursorStore":
+        """Async context manager entry."""
+        await self.connect()
+        return self
+
+    async def __aexit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+        """Async context manager exit."""
+        await self.close()
 
     async def get(self, name: str) -> ReplayCursor | None:
         """Get cursor by name.
@@ -72,14 +85,14 @@ class CursorStore:
 
         self._validate_name(name)
 
-        cursor = await self._conn.execute(
+        async with self._conn.execute(
             """
             SELECT name, last_ts_ms, last_event_id, updated_ts_ms
             FROM replay_cursors WHERE name = ?
             """,
             (name,),
-        )
-        row = await cursor.fetchone()
+        ) as cursor:
+            row = await cursor.fetchone()
 
         if row is None:
             return None
