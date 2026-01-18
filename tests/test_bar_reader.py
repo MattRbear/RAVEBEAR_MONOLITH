@@ -11,13 +11,9 @@ from ravebear_monolith.storage.bar_sink import Bar1s, BarSink
 
 async def seed_bars(db_path: Path, bars: list[Bar1s]) -> None:
     """Seed database with bars via BarSink."""
-    sink = BarSink(db_path)
-    await sink.open()
-    try:
+    async with BarSink(db_path) as sink:
         for bar in bars:
             await sink.upsert_bar(bar)
-    finally:
-        await sink.close()
 
 
 def make_bar(symbol: str, ts_ms: int, price: float = 100.0) -> Bar1s:
@@ -44,14 +40,10 @@ class TestBarReader:
         bars = [make_bar("BTC-USDT", 1000 * (i + 1)) for i in range(10)]
         await seed_bars(db_path, bars)
 
-        reader = BarReader(db_path)
-        await reader.connect()
-        try:
+        async with BarReader(db_path) as reader:
             rows = await reader.query(BarQuerySpec())
             assert len(rows) == 10
             assert all(isinstance(r, BarRow) for r in rows)
-        finally:
-            await reader.close()
 
     @pytest.mark.asyncio
     async def test_filter_by_symbol(self, tmp_path: Path) -> None:
@@ -65,14 +57,10 @@ class TestBarReader:
         ]
         await seed_bars(db_path, bars)
 
-        reader = BarReader(db_path)
-        await reader.connect()
-        try:
+        async with BarReader(db_path) as reader:
             rows = await reader.query(BarQuerySpec(symbol="BTC-USDT"))
             assert len(rows) == 2
             assert all(r.symbol == "BTC-USDT" for r in rows)
-        finally:
-            await reader.close()
 
     @pytest.mark.asyncio
     async def test_filter_by_time_range(self, tmp_path: Path) -> None:
@@ -81,15 +69,11 @@ class TestBarReader:
         bars = [make_bar("BTC-USDT", 1000 * (i + 1)) for i in range(10)]
         await seed_bars(db_path, bars)
 
-        reader = BarReader(db_path)
-        await reader.connect()
-        try:
+        async with BarReader(db_path) as reader:
             # Query bars from 3000 to 7000 (inclusive)
             rows = await reader.query(BarQuerySpec(ts_min=3000, ts_max=7000))
             assert len(rows) == 5
             assert all(3000 <= r.ts_ms <= 7000 for r in rows)
-        finally:
-            await reader.close()
 
     @pytest.mark.asyncio
     async def test_ordering_asc_desc(self, tmp_path: Path) -> None:
@@ -98,16 +82,12 @@ class TestBarReader:
         bars = [make_bar("BTC-USDT", 1000 * (i + 1)) for i in range(5)]
         await seed_bars(db_path, bars)
 
-        reader = BarReader(db_path)
-        await reader.connect()
-        try:
+        async with BarReader(db_path) as reader:
             asc_rows = await reader.query(BarQuerySpec(order="asc"))
             desc_rows = await reader.query(BarQuerySpec(order="desc"))
 
             assert asc_rows[0].ts_ms < asc_rows[-1].ts_ms
             assert desc_rows[0].ts_ms > desc_rows[-1].ts_ms
-        finally:
-            await reader.close()
 
     @pytest.mark.asyncio
     async def test_limit_enforced(self, tmp_path: Path) -> None:
@@ -116,13 +96,9 @@ class TestBarReader:
         bars = [make_bar("BTC-USDT", 1000 * (i + 1)) for i in range(10)]
         await seed_bars(db_path, bars)
 
-        reader = BarReader(db_path)
-        await reader.connect()
-        try:
+        async with BarReader(db_path) as reader:
             rows = await reader.query(BarQuerySpec(limit=3))
             assert len(rows) == 3
-        finally:
-            await reader.close()
 
     def test_limit_validation_error(self) -> None:
         """Limit > 50000 raises validation error."""
@@ -136,15 +112,11 @@ class TestBarReader:
         bars = [make_bar("BTC-USDT", 1000)]
         await seed_bars(db_path, bars)
 
-        reader = BarReader(db_path)
-        await reader.connect()
-        try:
+        async with BarReader(db_path) as reader:
             # Check pragma value
             cursor = await reader._conn.execute("PRAGMA query_only")  # type: ignore
             row = await cursor.fetchone()
             assert row[0] == 1  # query_only is ON
-        finally:
-            await reader.close()
 
     @pytest.mark.asyncio
     async def test_iter_query_streams(self, tmp_path: Path) -> None:
@@ -157,12 +129,8 @@ class TestBarReader:
             bars.append(make_bar(symbol, 1000 * (i + 1)))
         await seed_bars(db_path, bars)
 
-        reader = BarReader(db_path)
-        await reader.connect()
-        try:
+        async with BarReader(db_path) as reader:
             count = 0
             async for _ in reader.iter_query(BarQuerySpec(limit=50000), chunk_size=500):
                 count += 1
             assert count == 2500
-        finally:
-            await reader.close()

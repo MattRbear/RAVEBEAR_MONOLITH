@@ -43,13 +43,9 @@ def make_trade_event(
 
 async def seed_events(db_path: Path, events: list[CollectorEvent]) -> None:
     """Seed database with events via EventSink."""
-    sink = EventSink(db_path)
-    await sink.open()
-    try:
+    async with EventSink(db_path) as sink:
         for event in events:
             await sink.write(event)
-    finally:
-        await sink.close()
 
 
 class TestTradesToBars1sProcessor:
@@ -82,9 +78,7 @@ class TestTradesToBars1sProcessor:
         assert result == 0
 
         # Verify bar
-        bar_sink = BarSink(db_path)
-        await bar_sink.open()
-        try:
+        async with BarSink(db_path) as bar_sink:
             count = await bar_sink.count_bars("BTC-USDT")
             assert count == 1
 
@@ -99,8 +93,6 @@ class TestTradesToBars1sProcessor:
             assert 42000 <= bar.close <= 42090
             assert bar.volume == pytest.approx(1.0)  # 10 * 0.1
             assert bar.trade_count == 10
-        finally:
-            await bar_sink.close()
 
     @pytest.mark.asyncio
     async def test_rollover_creates_multiple_rows(self, tmp_path: Path) -> None:
@@ -133,9 +125,7 @@ class TestTradesToBars1sProcessor:
         assert result == 0
 
         # Verify bars
-        bar_sink = BarSink(db_path)
-        await bar_sink.open()
-        try:
+        async with BarSink(db_path) as bar_sink:
             count = await bar_sink.count_bars("ETH-USDT")
             assert count == 3
 
@@ -144,8 +134,6 @@ class TestTradesToBars1sProcessor:
             for bar in bars:
                 assert bar.trade_count == 3
                 assert bar.volume == pytest.approx(1.5)
-        finally:
-            await bar_sink.close()
 
     @pytest.mark.asyncio
     async def test_idempotent_replay(self, tmp_path: Path) -> None:
@@ -180,9 +168,7 @@ class TestTradesToBars1sProcessor:
         await processor2.finalize()
 
         # Verify: upsert merges correctly (volume and trade_count updated)
-        bar_sink = BarSink(db_path)
-        await bar_sink.open()
-        try:
+        async with BarSink(db_path) as bar_sink:
             count = await bar_sink.count_bars("BTC-USDT")
             assert count == 1
 
@@ -191,8 +177,6 @@ class TestTradesToBars1sProcessor:
             # Upsert adds volume/trade_count, so expect doubled values
             assert bar.trade_count == 10  # 5 * 2
             assert bar.volume == pytest.approx(1.0)  # 0.5 * 2
-        finally:
-            await bar_sink.close()
 
     @pytest.mark.asyncio
     async def test_bad_payload_fail_closed(self, tmp_path: Path) -> None:
@@ -201,9 +185,7 @@ class TestTradesToBars1sProcessor:
         kill_path = tmp_path / "kill.txt"
 
         # Create one valid and one invalid event
-        sink = EventSink(db_path)
-        await sink.open()
-        try:
+        async with EventSink(db_path) as sink:
             # Valid trade
             valid = CollectorEvent(
                 source="okx",
@@ -221,8 +203,6 @@ class TestTradesToBars1sProcessor:
                 payload={"inst_id": "BTC-USDT", "size": 0.1},  # No price!
             )
             await sink.write(invalid)
-        finally:
-            await sink.close()
 
         # Run processor
         processor = TradesToBars1sProcessor(db_path)

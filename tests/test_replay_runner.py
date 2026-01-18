@@ -24,13 +24,9 @@ def make_event(source: str, event_type: str, payload: dict, ts_suffix: int = 0) 
 
 async def seed_events(db_path: Path, events: list[CollectorEvent]) -> None:
     """Seed database with events via EventSink."""
-    sink = EventSink(db_path)
-    await sink.open()
-    try:
+    async with EventSink(db_path) as sink:
         for event in events:
             await sink.write(event)
-    finally:
-        await sink.close()
 
 
 class CollectingProcessor(ProcessorBase):
@@ -96,15 +92,11 @@ class TestReplayRunner:
         assert len(processor.processed_ids) == 5
 
         # Verify cursor was committed
-        cursors = CursorStore(db_path)
-        await cursors.connect()
-        try:
+        async with CursorStore(db_path) as cursors:
             cursor = await cursors.get("test")
             assert cursor is not None
             # Cursor should be at last event
             assert cursor.last_event_id == processor.processed_ids[-1]
-        finally:
-            await cursors.close()
 
     @pytest.mark.asyncio
     async def test_replay_runner_stops_on_processor_failure(self, tmp_path: Path) -> None:
@@ -126,15 +118,11 @@ class TestReplayRunner:
         assert result == 2
 
         # Cursor should be committed only for first 2 events
-        cursors = CursorStore(db_path)
-        await cursors.connect()
-        try:
+        async with CursorStore(db_path) as cursors:
             cursor = await cursors.get("test")
             assert cursor is not None
             # We processed 2 events successfully before failure
             assert runner.processed_count == 2
-        finally:
-            await cursors.close()
 
     @pytest.mark.asyncio
     async def test_replay_runner_fail_closed_on_exception(self, tmp_path: Path) -> None:
@@ -287,10 +275,6 @@ class TestReplayRunnerBestEffort:
         assert runner.processed_count == 0
 
         # Cursor should NOT exist (no successful commits)
-        cursors = CursorStore(db_path)
-        await cursors.connect()
-        try:
+        async with CursorStore(db_path) as cursors:
             cursor = await cursors.get("test")
             assert cursor is None
-        finally:
-            await cursors.close()

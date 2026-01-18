@@ -27,13 +27,9 @@ def make_event(source: str, event_type: str, payload: dict, ts_suffix: int = 0) 
 
 async def seed_events(db_path: Path, events: list[CollectorEvent]) -> None:
     """Seed database with events via EventSink."""
-    sink = EventSink(db_path)
-    await sink.open()
-    try:
+    async with EventSink(db_path) as sink:
         for event in events:
             await sink.write(event)
-    finally:
-        await sink.close()
 
 
 class TestEventReader:
@@ -46,14 +42,10 @@ class TestEventReader:
         events = [make_event("okx", "trade", {"price": 42000}, ts_suffix=i) for i in range(5)]
         await seed_events(db_path, events)
 
-        reader = EventReader(db_path)
-        await reader.connect()
-        try:
+        async with EventReader(db_path) as reader:
             rows = await reader.query(QuerySpec())
             assert len(rows) == 5
             assert all(isinstance(r, EventRow) for r in rows)
-        finally:
-            await reader.close()
 
     @pytest.mark.asyncio
     async def test_filter_by_source(self, tmp_path: Path) -> None:
@@ -66,14 +58,10 @@ class TestEventReader:
         ]
         await seed_events(db_path, events)
 
-        reader = EventReader(db_path)
-        await reader.connect()
-        try:
+        async with EventReader(db_path) as reader:
             rows = await reader.query(QuerySpec(source="okx"))
             assert len(rows) == 2
             assert all(r.source == "okx" for r in rows)
-        finally:
-            await reader.close()
 
     @pytest.mark.asyncio
     async def test_filter_by_event_type(self, tmp_path: Path) -> None:
@@ -86,14 +74,10 @@ class TestEventReader:
         ]
         await seed_events(db_path, events)
 
-        reader = EventReader(db_path)
-        await reader.connect()
-        try:
+        async with EventReader(db_path) as reader:
             rows = await reader.query(QuerySpec(event_type="ticker"))
             assert len(rows) == 1
             assert rows[0].event_type == "ticker"
-        finally:
-            await reader.close()
 
     @pytest.mark.asyncio
     async def test_filter_by_time_range(self, tmp_path: Path) -> None:
@@ -102,9 +86,7 @@ class TestEventReader:
         events = [make_event("okx", "trade", {"seq": i}, ts_suffix=i) for i in range(10)]
         await seed_events(db_path, events)
 
-        reader = EventReader(db_path)
-        await reader.connect()
-        try:
+        async with EventReader(db_path) as reader:
             # Get first event's timestamp
             all_rows = await reader.query(QuerySpec())
             ts_min = all_rows[2].ts_ms
@@ -112,8 +94,6 @@ class TestEventReader:
 
             rows = await reader.query(QuerySpec(ts_min=ts_min, ts_max=ts_max))
             assert len(rows) == 4  # Events 2, 3, 4, 5
-        finally:
-            await reader.close()
 
     @pytest.mark.asyncio
     async def test_ordering_asc_desc(self, tmp_path: Path) -> None:
@@ -122,16 +102,12 @@ class TestEventReader:
         events = [make_event("okx", "trade", {"seq": i}, ts_suffix=i) for i in range(5)]
         await seed_events(db_path, events)
 
-        reader = EventReader(db_path)
-        await reader.connect()
-        try:
+        async with EventReader(db_path) as reader:
             asc_rows = await reader.query(QuerySpec(order="asc"))
             desc_rows = await reader.query(QuerySpec(order="desc"))
 
             assert asc_rows[0].ts_ms < asc_rows[-1].ts_ms
             assert desc_rows[0].ts_ms > desc_rows[-1].ts_ms
-        finally:
-            await reader.close()
 
     @pytest.mark.asyncio
     async def test_limit_enforced(self, tmp_path: Path) -> None:
@@ -140,13 +116,9 @@ class TestEventReader:
         events = [make_event("okx", "trade", {"seq": i}, ts_suffix=i % 60) for i in range(10)]
         await seed_events(db_path, events)
 
-        reader = EventReader(db_path)
-        await reader.connect()
-        try:
+        async with EventReader(db_path) as reader:
             rows = await reader.query(QuerySpec(limit=1))
             assert len(rows) == 1
-        finally:
-            await reader.close()
 
     def test_limit_validation_error(self) -> None:
         """Limit > 50000 raises validation error."""
@@ -160,15 +132,11 @@ class TestEventReader:
         events = [make_event("okx", "trade", {"price": 1}, ts_suffix=0)]
         await seed_events(db_path, events)
 
-        reader = EventReader(db_path)
-        await reader.connect()
-        try:
+        async with EventReader(db_path) as reader:
             # Check pragma value
             cursor = await reader._conn.execute("PRAGMA query_only")  # type: ignore
             row = await cursor.fetchone()
             assert row[0] == 1  # query_only is ON
-        finally:
-            await reader.close()
 
     @pytest.mark.asyncio
     async def test_iter_query_streams(self, tmp_path: Path) -> None:
@@ -178,17 +146,13 @@ class TestEventReader:
         events = [make_event("okx", "trade", {"seq": i}, ts_suffix=i % 60) for i in range(2500)]
         await seed_events(db_path, events)
 
-        reader = EventReader(db_path)
-        await reader.connect()
-        try:
+        async with EventReader(db_path) as reader:
             count = 0
             async for _ in reader.iter_query(QuerySpec(limit=50000), chunk_size=500):
                 count += 1
             # May be less than 2500 due to deduplication if ts_suffix collisions
             # But with unique payloads, should be 2500
             assert count >= 1
-        finally:
-            await reader.close()
 
     @pytest.mark.asyncio
     async def test_payload_as_dict(self, tmp_path: Path) -> None:
@@ -197,12 +161,8 @@ class TestEventReader:
         events = [make_event("okx", "trade", {"price": 42000.5, "size": 1.5}, ts_suffix=0)]
         await seed_events(db_path, events)
 
-        reader = EventReader(db_path)
-        await reader.connect()
-        try:
+        async with EventReader(db_path) as reader:
             rows = await reader.query(QuerySpec())
             payload = payload_as_dict(rows[0])
             assert payload["price"] == 42000.5
             assert payload["size"] == 1.5
-        finally:
-            await reader.close()

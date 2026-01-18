@@ -34,13 +34,9 @@ class TestOrchestratorStorageIntegration:
         assert result == 0
 
         # Verify events in database
-        sink = EventSink(db_path)
-        await sink.open()
-        try:
+        async with EventSink(db_path) as sink:
             count = await sink.count()
             assert count == 5
-        finally:
-            await sink.close()
 
     @pytest.mark.asyncio
     async def test_all_events_written(self, tmp_path: Path) -> None:
@@ -60,13 +56,9 @@ class TestOrchestratorStorageIntegration:
         assert result == 0
 
         # Verify all 10 events from fixture
-        sink = EventSink(db_path)
-        await sink.open()
-        try:
+        async with EventSink(db_path) as sink:
             count = await sink.count()
             assert count == 10
-        finally:
-            await sink.close()
 
     @pytest.mark.asyncio
     async def test_kill_switch_triggered_on_write_failure(self, tmp_path: Path) -> None:
@@ -132,10 +124,6 @@ class TestOrchestratorStorageIntegration:
         assert result == 0
 
         # Opening new sink should work (previous was closed)
-        sink = EventSink(db_path)
-        await sink.open()
-        try:
+        async with EventSink(db_path) as sink:
             count = await sink.count()
             assert count == 1
-        finally:
-            await sink.close()

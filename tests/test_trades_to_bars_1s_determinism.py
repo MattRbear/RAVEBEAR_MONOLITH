@@ -44,13 +44,9 @@ async def seed_events_shuffled(
         events = events.copy()
         random.shuffle(events)
 
-    sink = EventSink(db_path)
-    await sink.open()
-    try:
+    async with EventSink(db_path) as sink:
         for event in events:
             await sink.write(event)
-    finally:
-        await sink.close()
 
 
 class TestTradesToBars1sDeterminism:
@@ -100,15 +96,11 @@ class TestTradesToBars1sDeterminism:
         await processor2.finalize()
 
         # Get bars from both runs
-        sink1 = BarSink(db1)
-        await sink1.open()
-        bars1 = await sink1.get_all_bars("BTC-USDT")
-        await sink1.close()
+        async with BarSink(db1) as sink1:
+            bars1 = await sink1.get_all_bars("BTC-USDT")
 
-        sink2 = BarSink(db2)
-        await sink2.open()
-        bars2 = await sink2.get_all_bars("BTC-USDT")
-        await sink2.close()
+        async with BarSink(db2) as sink2:
+            bars2 = await sink2.get_all_bars("BTC-USDT")
 
         # Assert identical bars
         assert len(bars1) == 1
@@ -146,10 +138,8 @@ class TestTradesToBars1sDeterminism:
         await runner.run()
         await processor.finalize()
 
-        sink = BarSink(db_path)
-        await sink.open()
-        bars = await sink.get_all_bars("ETH-USDT")
-        await sink.close()
+        async with BarSink(db_path) as sink:
+            bars = await sink.get_all_bars("ETH-USDT")
 
         assert len(bars) == 1
         bar = bars[0]
@@ -186,10 +176,8 @@ class TestTradesToBars1sDeterminism:
             await runner.run()
             await processor.finalize()
 
-            sink = BarSink(db)
-            await sink.open()
-            bars = await sink.get_all_bars("BTC-USDT")
-            await sink.close()
+            async with BarSink(db) as sink:
+                bars = await sink.get_all_bars("BTC-USDT")
 
             results.append(bars[0])
 

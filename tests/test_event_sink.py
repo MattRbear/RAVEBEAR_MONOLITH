@@ -26,10 +26,8 @@ class TestEventSink:
     async def test_write_and_read_roundtrip(self, tmp_path: Path) -> None:
         """Write event and read it back."""
         db_path = tmp_path / "test.db"
-        sink = EventSink(db_path)
 
-        await sink.open()
-        try:
+        async with EventSink(db_path) as sink:
             event = make_event("okx", "trade", {"price": 42000.0, "size": 0.5})
             await sink.write(event)
 
@@ -38,17 +36,13 @@ class TestEventSink:
             assert events[0]["source"] == "okx"
             assert events[0]["type"] == "trade"
             assert events[0]["payload"]["price"] == 42000.0
-        finally:
-            await sink.close()
 
     @pytest.mark.asyncio
     async def test_dedupe_same_event_twice(self, tmp_path: Path) -> None:
         """Same event written twice results in one row."""
         db_path = tmp_path / "test.db"
-        sink = EventSink(db_path)
 
-        await sink.open()
-        try:
+        async with EventSink(db_path) as sink:
             event = make_event("okx", "trade", {"price": 42000.0})
 
             await sink.write(event)
@@ -56,17 +50,13 @@ class TestEventSink:
 
             count = await sink.count()
             assert count == 1
-        finally:
-            await sink.close()
 
     @pytest.mark.asyncio
     async def test_different_events_not_deduped(self, tmp_path: Path) -> None:
         """Different events are stored separately."""
         db_path = tmp_path / "test.db"
-        sink = EventSink(db_path)
 
-        await sink.open()
-        try:
+        async with EventSink(db_path) as sink:
             event1 = make_event("okx", "trade", {"price": 42000.0}, ts_suffix=0)
             event2 = make_event("okx", "trade", {"price": 42001.0}, ts_suffix=1)
 
@@ -75,8 +65,6 @@ class TestEventSink:
 
             count = await sink.count()
             assert count == 2
-        finally:
-            await sink.close()
 
     @pytest.mark.asyncio
     async def test_wal_recovery_data_persists(self, tmp_path: Path) -> None:
@@ -84,32 +72,24 @@ class TestEventSink:
         db_path = tmp_path / "test.db"
 
         # Write event
-        sink1 = EventSink(db_path)
-        await sink1.open()
-        event = make_event("okx", "trade", {"price": 42000.0})
-        await sink1.write(event)
-        await sink1.close()
+        async with EventSink(db_path) as sink1:
+            event = make_event("okx", "trade", {"price": 42000.0})
+            await sink1.write(event)
 
         # Reopen and verify
-        sink2 = EventSink(db_path)
-        await sink2.open()
-        try:
+        async with EventSink(db_path) as sink2:
             count = await sink2.count()
             assert count == 1
 
             events = await sink2.read_all()
             assert events[0]["payload"]["price"] == 42000.0
-        finally:
-            await sink2.close()
 
     @pytest.mark.asyncio
     async def test_concurrent_writes_no_corruption(self, tmp_path: Path) -> None:
         """Concurrent async writes don't corrupt database."""
         db_path = tmp_path / "test.db"
-        sink = EventSink(db_path)
 
-        await sink.open()
-        try:
+        async with EventSink(db_path) as sink:
             # Create many unique events
             events = [
                 make_event("okx", "trade", {"seq": i, "price": 42000.0 + i}, ts_suffix=i % 60)
@@ -123,20 +103,14 @@ class TestEventSink:
             count = await sink.count()
             assert count >= 1  # At minimum one, should be 50 with unique payloads
             assert count <= 50
-        finally:
-            await sink.close()
 
     @pytest.mark.asyncio
     async def test_creates_parent_directory(self, tmp_path: Path) -> None:
         """EventSink creates parent directories for db_path."""
         db_path = tmp_path / "nested" / "dir" / "test.db"
-        sink = EventSink(db_path)
 
-        await sink.open()
-        try:
+        async with EventSink(db_path) as sink:
             assert db_path.parent.exists()
-        finally:
-            await sink.close()
 
     @pytest.mark.asyncio
     async def test_write_without_open_raises(self, tmp_path: Path) -> None:
@@ -153,11 +127,7 @@ class TestEventSink:
     async def test_count_returns_zero_for_empty(self, tmp_path: Path) -> None:
         """Count returns 0 for empty database."""
         db_path = tmp_path / "test.db"
-        sink = EventSink(db_path)
 
-        await sink.open()
-        try:
+        async with EventSink(db_path) as sink:
             count = await sink.count()
             assert count == 0
-        finally:
-            await sink.close()

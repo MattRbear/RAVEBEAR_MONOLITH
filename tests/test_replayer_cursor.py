@@ -23,13 +23,9 @@ def make_event(source: str, event_type: str, payload: dict, ts_suffix: int = 0) 
 
 async def seed_events(db_path: Path, events: list[CollectorEvent]) -> None:
     """Seed database with events via EventSink."""
-    sink = EventSink(db_path)
-    await sink.open()
-    try:
+    async with EventSink(db_path) as sink:
         for event in events:
             await sink.write(event)
-    finally:
-        await sink.close()
 
 
 class TestCursorStore:
@@ -41,13 +37,10 @@ class TestCursorStore:
         db_path = tmp_path / "test.db"
 
         # Initialize schema via EventSink
-        sink = EventSink(db_path)
-        await sink.open()
-        await sink.close()
+        async with EventSink(db_path) as sink:
+            pass  # Just create schema
 
-        cursors = CursorStore(db_path)
-        await cursors.connect()
-        try:
+        async with CursorStore(db_path) as cursors:
             # Initially no cursor
             cursor = await cursors.get("test_cursor")
             assert cursor is None
@@ -68,8 +61,6 @@ class TestCursorStore:
             cursor = await cursors.get("test_cursor")
             assert cursor.last_ts_ms == 1705536001000
             assert cursor.last_event_id == "def456"
-        finally:
-            await cursors.close()
 
 
 class TestEventReplayer:
@@ -82,23 +73,16 @@ class TestEventReplayer:
         events = [make_event("okx", "trade", {"seq": i}, ts_suffix=i) for i in range(5)]
         await seed_events(db_path, events)
 
-        reader = EventReader(db_path)
-        await reader.connect()
-        cursors = CursorStore(db_path)
-        await cursors.connect()
+        async with EventReader(db_path) as reader:
+            async with CursorStore(db_path) as cursors:
+                config = ReplayerConfig(cursor_name="test")
+                replayer = EventReplayer(reader, cursors, config)
 
-        try:
-            config = ReplayerConfig(cursor_name="test")
-            replayer = EventReplayer(reader, cursors, config)
+                results = []
+                async for event in replayer.iter_events():
+                    results.append(event)
 
-            results = []
-            async for event in replayer.iter_events():
-                results.append(event)
-
-            assert len(results) == 5
-        finally:
-            await reader.close()
-            await cursors.close()
+                assert len(results) == 5
 
     @pytest.mark.asyncio
     async def test_resumes_after_cursor(self, tmp_path: Path) -> None:
@@ -107,37 +91,30 @@ class TestEventReplayer:
         events = [make_event("okx", "trade", {"seq": i}, ts_suffix=i) for i in range(10)]
         await seed_events(db_path, events)
 
-        reader = EventReader(db_path)
-        await reader.connect()
-        cursors = CursorStore(db_path)
-        await cursors.connect()
+        async with EventReader(db_path) as reader:
+            async with CursorStore(db_path) as cursors:
+                config = ReplayerConfig(cursor_name="test", max_events=3)
+                replayer = EventReplayer(reader, cursors, config)
 
-        try:
-            config = ReplayerConfig(cursor_name="test", max_events=3)
-            replayer = EventReplayer(reader, cursors, config)
+                # Process first 3 events
+                processed = []
+                async for event in replayer.iter_events():
+                    processed.append(event)
+                    await replayer.commit_cursor(event)
 
-            # Process first 3 events
-            processed = []
-            async for event in replayer.iter_events():
-                processed.append(event)
-                await replayer.commit_cursor(event)
+                assert len(processed) == 3
 
-            assert len(processed) == 3
+                # Resume - should get next 3
+                config2 = ReplayerConfig(cursor_name="test", max_events=3)
+                replayer2 = EventReplayer(reader, cursors, config2)
 
-            # Resume - should get next 3
-            config2 = ReplayerConfig(cursor_name="test", max_events=3)
-            replayer2 = EventReplayer(reader, cursors, config2)
+                resumed = []
+                async for event in replayer2.iter_events():
+                    resumed.append(event)
 
-            resumed = []
-            async for event in replayer2.iter_events():
-                resumed.append(event)
-
-            assert len(resumed) == 3
-            # Should not overlap
-            assert processed[-1].id != resumed[0].id
-        finally:
-            await reader.close()
-            await cursors.close()
+                assert len(resumed) == 3
+                # Should not overlap
+                assert processed[-1].id != resumed[0].id
 
     @pytest.mark.asyncio
     async def test_boundary_dedup_same_event_not_reemitted(self, tmp_path: Path) -> None:
@@ -146,31 +123,24 @@ class TestEventReplayer:
         events = [make_event("okx", "trade", {"seq": i}, ts_suffix=i) for i in range(5)]
         await seed_events(db_path, events)
 
-        reader = EventReader(db_path)
-        await reader.connect()
-        cursors = CursorStore(db_path)
-        await cursors.connect()
+        async with EventReader(db_path) as reader:
+            async with CursorStore(db_path) as cursors:
+                # Process all and commit last
+                config = ReplayerConfig(cursor_name="test")
+                replayer = EventReplayer(reader, cursors, config)
 
-        try:
-            # Process all and commit last
-            config = ReplayerConfig(cursor_name="test")
-            replayer = EventReplayer(reader, cursors, config)
+                async for event in replayer.iter_events():
+                    await replayer.commit_cursor(event)
 
-            async for event in replayer.iter_events():
-                await replayer.commit_cursor(event)
+                # Resume - should get nothing (all processed)
+                config2 = ReplayerConfig(cursor_name="test")
+                replayer2 = EventReplayer(reader, cursors, config2)
 
-            # Resume - should get nothing (all processed)
-            config2 = ReplayerConfig(cursor_name="test")
-            replayer2 = EventReplayer(reader, cursors, config2)
+                count = 0
+                async for _ in replayer2.iter_events():
+                    count += 1
 
-            count = 0
-            async for _ in replayer2.iter_events():
-                count += 1
-
-            assert count == 0
-        finally:
-            await reader.close()
-            await cursors.close()
+                assert count == 0
 
     @pytest.mark.asyncio
     async def test_deterministic_tie_break_same_ts_orders_by_id(self, tmp_path: Path) -> None:
@@ -180,24 +150,17 @@ class TestEventReplayer:
         events = [make_event("okx", "trade", {"seq": i}, ts_suffix=5) for i in range(5)]
         await seed_events(db_path, events)
 
-        reader = EventReader(db_path)
-        await reader.connect()
-        cursors = CursorStore(db_path)
-        await cursors.connect()
+        async with EventReader(db_path) as reader:
+            async with CursorStore(db_path) as cursors:
+                config = ReplayerConfig(cursor_name="test")
+                replayer = EventReplayer(reader, cursors, config)
 
-        try:
-            config = ReplayerConfig(cursor_name="test")
-            replayer = EventReplayer(reader, cursors, config)
+                ids = []
+                async for event in replayer.iter_events():
+                    ids.append(event.id)
 
-            ids = []
-            async for event in replayer.iter_events():
-                ids.append(event.id)
-
-            # IDs should be sorted
-            assert ids == sorted(ids)
-        finally:
-            await reader.close()
-            await cursors.close()
+                # IDs should be sorted
+                assert ids == sorted(ids)
 
     @pytest.mark.asyncio
     async def test_max_events_stops_early(self, tmp_path: Path) -> None:
@@ -206,20 +169,13 @@ class TestEventReplayer:
         events = [make_event("okx", "trade", {"seq": i}, ts_suffix=i) for i in range(10)]
         await seed_events(db_path, events)
 
-        reader = EventReader(db_path)
-        await reader.connect()
-        cursors = CursorStore(db_path)
-        await cursors.connect()
+        async with EventReader(db_path) as reader:
+            async with CursorStore(db_path) as cursors:
+                config = ReplayerConfig(cursor_name="test", max_events=3)
+                replayer = EventReplayer(reader, cursors, config)
 
-        try:
-            config = ReplayerConfig(cursor_name="test", max_events=3)
-            replayer = EventReplayer(reader, cursors, config)
+                count = 0
+                async for _ in replayer.iter_events():
+                    count += 1
 
-            count = 0
-            async for _ in replayer.iter_events():
-                count += 1
-
-            assert count == 3
-        finally:
-            await reader.close()
-            await cursors.close()
+                assert count == 3
