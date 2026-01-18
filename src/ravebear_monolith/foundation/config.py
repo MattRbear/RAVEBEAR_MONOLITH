@@ -9,6 +9,13 @@ from pydantic import BaseModel, PositiveInt, ValidationError
 from ravebear_monolith.util.errors import ConfigError
 
 
+class OKXConfig(BaseModel, extra="forbid"):
+    """OKX-specific configuration."""
+
+    inst_id: str = "BTC-USDT"
+    ws_url: str = "wss://ws.okx.com:8443/ws/v5/public"
+
+
 class AppConfig(BaseModel, strict=True, extra="forbid"):
     """Application configuration with strict type validation.
 
@@ -31,6 +38,9 @@ class AppConfig(BaseModel, strict=True, extra="forbid"):
     # Collector settings
     collectors_enabled: list[str] = []
     max_events_per_run: int | None = None
+
+    # Exchange-specific configs
+    okx: OKXConfig = OKXConfig()
 
 
 def load_config(path: Path) -> AppConfig:

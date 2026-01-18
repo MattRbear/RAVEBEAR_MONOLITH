@@ -18,3 +18,8 @@ min_python_minor: 12
 collectors_enabled:
   - okx_trades_dry
 max_events_per_run: null
+
+# OKX configuration
+okx:
+  inst_id: BTC-USDT
+  ws_url: wss://ws.okx.com:8443/ws/v5/public
