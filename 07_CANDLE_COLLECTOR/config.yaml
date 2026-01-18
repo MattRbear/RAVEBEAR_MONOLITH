@@ -1,0 +1,83 @@
+venues:
+  coinbase:
+    enabled: true
+    rest_url: https://api.exchange.coinbase.com
+    ws_url: wss://ws-feed.exchange.coinbase.com
+    symbols:
+      - BTC-USD
+      - ETH-USD
+      - SOL-USD
+      - AVAX-USD
+      - LINK-USD
+      - UNI-USD
+      - AAVE-USD
+      - DOT-USD
+      - ATOM-USD
+    rate_limit_per_sec: 10.0
+    
+  kraken:
+    enabled: true
+    rest_url: https://api.kraken.com
+    ws_url: wss://ws.kraken.com/v2
+    symbols:
+      # Kraken WS v2 uses BTC format (not XBT)
+      - BTC/USD
+      - ETH/USD
+      - SOL/USD
+      - AVAX/USD
+      - LINK/USD
+      - UNI/USD
+      - AAVE/USD
+      - DOT/USD
+      - ATOM/USD
+    rate_limit_per_sec: 5.0
+    
+  okx:
+    enabled: true
+    rest_url: https://www.okx.com
+    ws_url: wss://ws.okx.com:8443/ws/v5/business
+    symbols:
+      - BTC-USDT
+      - ETH-USDT
+      - SOL-USDT
+      - AVAX-USDT
+      # MATIC rebranded to POL in 2024
+      - POL-USDT
+      - LINK-USDT
+      - UNI-USDT
+      - AAVE-USDT
+      - DOT-USDT
+      - ATOM-USDT
+    rate_limit_per_sec: 20.0
+
+# Timeframes
+timeframes: ["1m", "5m", "15m", "1h", "4h", "1d"]
+ws_timeframes: ["1m"]
+derive_timeframes: ["5m", "15m", "1h", "4h", "1d"]
+
+# Storage
+storage:
+  path: data
+  schema_version: "2"
+
+# Gap detection - DISABLED on startup to avoid errors
+gap_detection:
+  enabled: false
+  lookback_days: 3
+  backfill_chunk_size: 100
+
+# Validation
+validation:
+  out_of_order_window: 5
+
+# Logging
+logging:
+  level: WARNING
+  file: logs/collector.log
+  max_bytes: 10000000
+  backup_count: 5
+
+# Aggregation
+aggregation:
+  enabled: true
+  base_timeframe: "1m"

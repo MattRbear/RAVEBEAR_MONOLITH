@@ -1,0 +1,49 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# --- OS / Editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# --- Secrets ---
+secrets*.yaml
+secrets*.yml
+*.pem
+*.p12
+*.pfx
+*private*
+*key*
+*.env.*
+
+# --- Databases / WAL ---
+*.db
+*.sqlite
+*.sqlite3
+*.wal
+*.shm
+
+# --- Data / Parquet / Artifacts ---
+data/
+parquet/
+*.parquet
+*.arrow
+*.feather
+artifacts/
+outputs/
+
+# --- Logs ---
+logs/
+*.log
+
+# --- Testing / Tooling ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/

@@ -1,0 +1,58 @@
+# ================================================================================
+# FLINT'S WHALE INTELLIGENCE SYSTEM - DEPENDENCIES
+# ================================================================================
+# Install with: pip install -r requirements.txt
+# ================================================================================
+
+# =========================
+# CORE
+# =========================
+python-dotenv>=1.0.0        # Environment loading (backup, we have custom)
+requests>=2.31.0            # HTTP client for REST APIs
+aiohttp>=3.9.0              # Async HTTP client
+websockets>=12.0            # WebSocket client (Whale Alert, Alchemy)
+
+# =========================
+# DATABASE
+# =========================
+psycopg2-binary>=2.9.9      # PostgreSQL driver
+sqlalchemy>=2.0.0           # ORM (optional, for complex queries)
+
+# =========================
+# DATA PROCESSING
+# =========================
+pandas>=2.0.0               # Data manipulation
+numpy>=1.24.0               # Numerical operations
+networkx>=3.0               # Graph analysis (clustering)
+
+# =========================
+# ASYNC / CONCURRENCY
+# =========================
+asyncio-throttle>=1.0.2     # Async rate limiting
+redis>=5.0.0                # Queue/cache (optional)
+
+# =========================
+# UTILITIES
+# =========================
+python-dateutil>=2.8.2      # Date parsing
+pytz>=2024.1                # Timezone handling
+
+# =========================
+# LOGGING / MONITORING
+# =========================
+structlog>=24.0.0           # Structured logging
+rich>=13.0.0                # Pretty console output
+
+# =========================
+# TESTING
+# =========================
+pytest>=8.0.0               # Test framework
+pytest-asyncio>=0.23.0      # Async test support
+pytest-mock>=3.12.0         # Mocking
+responses>=0.25.0           # Mock HTTP responses
+
+# =========================
+# TYPE CHECKING (dev)
+# =========================
+mypy>=1.8.0                 # Static type checking
+types-requests>=2.31.0      # Type stubs
