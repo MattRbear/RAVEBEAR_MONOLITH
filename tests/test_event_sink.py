@@ -109,7 +109,7 @@ class TestEventSink:
         """EventSink creates parent directories for db_path."""
         db_path = tmp_path / "nested" / "dir" / "test.db"
 
-        async with EventSink(db_path) as sink:
+        async with EventSink(db_path) as _sink:
             assert db_path.parent.exists()
 
     @pytest.mark.asyncio

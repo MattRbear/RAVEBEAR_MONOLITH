@@ -37,7 +37,7 @@ class TestCursorStore:
         db_path = tmp_path / "test.db"
 
         # Initialize schema via EventSink
-        async with EventSink(db_path) as sink:
+        async with EventSink(db_path) as _:
             pass  # Just create schema
 
         async with CursorStore(db_path) as cursors:
