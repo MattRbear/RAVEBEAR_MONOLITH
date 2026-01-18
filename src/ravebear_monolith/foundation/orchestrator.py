@@ -1,11 +1,15 @@
-"""Orchestrator skeleton with lifecycle management."""
+"""Orchestrator skeleton with lifecycle management and structured logging."""
 
 import argparse
 import asyncio
+import logging
 import sys
 from pathlib import Path
 
 from ravebear_monolith.foundation.config import AppConfig, load_config
+from ravebear_monolith.util.logging import configure_logging, log_event
+
+logger = logging.getLogger(__name__)
 
 
 async def run(config: AppConfig, *, max_beats: int | None = None) -> int:
@@ -19,11 +23,22 @@ async def run(config: AppConfig, *, max_beats: int | None = None) -> int:
     Returns:
         0 on clean shutdown.
     """
+    # Configure logging at startup
+    configure_logging(config)
+
+    log_event(logger, logging.INFO, f"Starting {config.app_name}", event="orchestrator_start")
+
     beat_count = 0
 
     try:
         while True:
-            print(f"heartbeat [{config.app_name}]")
+            log_event(
+                logger,
+                logging.DEBUG,
+                f"heartbeat [{config.app_name}]",
+                event="heartbeat",
+                beat_count=beat_count,
+            )
             beat_count += 1
 
             if max_beats is not None and beat_count >= max_beats:
@@ -32,7 +47,7 @@ async def run(config: AppConfig, *, max_beats: int | None = None) -> int:
             await asyncio.sleep(config.heartbeat_interval_s)
 
     except asyncio.CancelledError:
-        print("Orchestrator received cancellation, shutting down...")
+        log_event(logger, logging.INFO, "Orchestrator shutting down", event="orchestrator_stop")
 
     return 0
 
