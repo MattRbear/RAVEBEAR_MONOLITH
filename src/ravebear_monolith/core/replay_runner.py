@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 
 from ravebear_monolith.core.processor import ProcessorBase
+from ravebear_monolith.core.processor_router import FailurePolicy, ProcessorRouter
 from ravebear_monolith.storage.cursor_store import CursorStore
 from ravebear_monolith.storage.event_reader import EventReader
 from ravebear_monolith.storage.replayer import EventReplayer, ReplayerConfig
@@ -24,11 +25,21 @@ def _trigger_kill_switch(path: Path, reason: str) -> None:
         pass  # Best effort
 
 
+def _get_failure_policy(processor: ProcessorBase) -> FailurePolicy:
+    """Get failure policy from processor if it's a router."""
+    if isinstance(processor, ProcessorRouter):
+        return processor.policy
+    return FailurePolicy.FAIL_CLOSED  # Default for non-routers
+
+
 class ReplayRunner:
     """Runner for deterministic event replay with cursor-commit semantics.
 
     Processes events through a processor and commits cursor only on success.
-    Fail-closed: any exception triggers kill switch and non-zero exit.
+    Exit codes:
+        0: Success
+        2: FAIL_CLOSED failure (kills switch written)
+        3: BEST_EFFORT failure (no kill switch)
 
     Args:
         db_path: Path to SQLite database.
@@ -56,6 +67,7 @@ class ReplayRunner:
         self._max_events = max_events
         self._kill_switch_path = kill_switch_path or Path("config/kill_switch.txt")
         self._processed_count = 0
+        self._policy = _get_failure_policy(processor)
 
     @property
     def processed_count(self) -> int:
@@ -66,10 +78,10 @@ class ReplayRunner:
         """Run the replay pipeline.
 
         Processes events through the processor, committing cursor after each
-        successful processing. Fail-closed on any error.
+        successful processing.
 
         Returns:
-            0 on success, 2 on error.
+            0 on success, 2 on FAIL_CLOSED error, 3 on BEST_EFFORT error.
         """
         reader = EventReader(self._db_path)
         cursors = CursorStore(self._db_path)
@@ -97,7 +109,7 @@ class ReplayRunner:
                 try:
                     result = await self._processor.process(event)
                 except Exception as e:
-                    # Exception in processor - fail-closed
+                    # Exception in processor
                     log_event(
                         logger,
                         logging.ERROR,
@@ -107,14 +119,18 @@ class ReplayRunner:
                         event_ts_ms=event.ts_ms,
                         error=str(e),
                     )
-                    _trigger_kill_switch(
-                        self._kill_switch_path,
-                        f"Processor exception on event {event.id}: {e}",
-                    )
-                    return 2
+                    if self._policy == FailurePolicy.FAIL_CLOSED:
+                        _trigger_kill_switch(
+                            self._kill_switch_path,
+                            f"Processor exception on event {event.id}: {e}",
+                        )
+                        return 2
+                    else:
+                        # BEST_EFFORT: no kill switch, exit 3
+                        return 3
 
                 if not result.ok:
-                    # Processor returned failure - fail-closed
+                    # Processor returned failure
                     log_event(
                         logger,
                         logging.ERROR,
@@ -124,11 +140,15 @@ class ReplayRunner:
                         event_ts_ms=event.ts_ms,
                         reason=result.reason,
                     )
-                    _trigger_kill_switch(
-                        self._kill_switch_path,
-                        f"Processor failed on event {event.id}: {result.reason}",
-                    )
-                    return 2
+                    if self._policy == FailurePolicy.FAIL_CLOSED:
+                        _trigger_kill_switch(
+                            self._kill_switch_path,
+                            f"Processor failed on event {event.id}: {result.reason}",
+                        )
+                        return 2
+                    else:
+                        # BEST_EFFORT: no kill switch, exit 3, no cursor commit
+                        return 3
 
                 # Commit cursor ONLY after successful processing
                 try:
@@ -143,11 +163,14 @@ class ReplayRunner:
                         event_id=event.id,
                         error=str(e),
                     )
-                    _trigger_kill_switch(
-                        self._kill_switch_path,
-                        f"Cursor commit failed: {e}",
-                    )
-                    return 2
+                    if self._policy == FailurePolicy.FAIL_CLOSED:
+                        _trigger_kill_switch(
+                            self._kill_switch_path,
+                            f"Cursor commit failed: {e}",
+                        )
+                        return 2
+                    else:
+                        return 3
 
             log_event(
                 logger,

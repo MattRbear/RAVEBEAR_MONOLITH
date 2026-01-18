@@ -198,3 +198,99 @@ class TestReplayRunner:
 
         # No overlap
         assert set(processor1.processed_ids).isdisjoint(set(processor2.processed_ids))
+
+
+class TestReplayRunnerBestEffort:
+    """Tests for ReplayRunner with BEST_EFFORT policy via ProcessorRouter."""
+
+    @pytest.mark.asyncio
+    async def test_best_effort_returns_3_on_failure(self, tmp_path: Path) -> None:
+        """BEST_EFFORT returns exit 3 on processor failure."""
+        from ravebear_monolith.core.processor_router import FailurePolicy, ProcessorRouter
+
+        db_path = tmp_path / "test.db"
+        kill_path = tmp_path / "kill.txt"
+        events = [make_event("okx", "trade", {"seq": i}, ts_suffix=i) for i in range(5)]
+        await seed_events(db_path, events)
+
+        failing_processor = FailingProcessor(fail_at=2)
+        router = ProcessorRouter(
+            {"main": failing_processor},
+            policy=FailurePolicy.BEST_EFFORT,
+        )
+
+        runner = ReplayRunner(
+            db_path=db_path,
+            cursor_name="test",
+            processor=router,
+            kill_switch_path=kill_path,
+        )
+
+        result = await runner.run()
+
+        assert result == 3
+        # Kill switch should NOT be written for BEST_EFFORT
+        assert not kill_path.exists()
+
+    @pytest.mark.asyncio
+    async def test_best_effort_no_kill_switch_on_exception(self, tmp_path: Path) -> None:
+        """BEST_EFFORT does not write kill switch on exception."""
+        from ravebear_monolith.core.processor_router import FailurePolicy, ProcessorRouter
+
+        db_path = tmp_path / "test.db"
+        kill_path = tmp_path / "kill.txt"
+        events = [make_event("okx", "trade", {"seq": i}, ts_suffix=i) for i in range(5)]
+        await seed_events(db_path, events)
+
+        router = ProcessorRouter(
+            {"main": ExceptionProcessor(raise_at=1)},
+            policy=FailurePolicy.BEST_EFFORT,
+        )
+
+        runner = ReplayRunner(
+            db_path=db_path,
+            cursor_name="test",
+            processor=router,
+            kill_switch_path=kill_path,
+        )
+
+        result = await runner.run()
+
+        assert result == 3
+        assert not kill_path.exists()
+
+    @pytest.mark.asyncio
+    async def test_best_effort_cursor_not_committed_on_failure(self, tmp_path: Path) -> None:
+        """BEST_EFFORT does not commit cursor when processor fails."""
+        from ravebear_monolith.core.processor_router import FailurePolicy, ProcessorRouter
+
+        db_path = tmp_path / "test.db"
+        events = [make_event("okx", "trade", {"seq": i}, ts_suffix=i) for i in range(5)]
+        await seed_events(db_path, events)
+
+        # Fail on first event
+        router = ProcessorRouter(
+            {"main": FailingProcessor(fail_at=1)},
+            policy=FailurePolicy.BEST_EFFORT,
+        )
+
+        runner = ReplayRunner(
+            db_path=db_path,
+            cursor_name="test",
+            processor=router,
+            kill_switch_path=tmp_path / "kill.txt",
+        )
+
+        result = await runner.run()
+
+        assert result == 3
+        assert runner.processed_count == 0
+
+        # Cursor should NOT exist (no successful commits)
+        cursors = CursorStore(db_path)
+        await cursors.connect()
+        try:
+            cursor = await cursors.get("test")
+            assert cursor is None
+        finally:
+            await cursors.close()
