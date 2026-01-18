@@ -1,0 +1,8 @@
+# Ravebear Monolith Configuration
+# Development defaults - safe for local testing
+
+app_name: RAVEBEAR_MONOLITH
+environment: dev
+log_level: INFO
+shutdown_timeout_s: 5
+heartbeat_interval_s: 5
