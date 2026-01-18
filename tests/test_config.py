@@ -110,3 +110,38 @@ class TestAppConfigModel:
         """PositiveInt fields reject negative values."""
         with pytest.raises(Exception):
             AppConfig(heartbeat_interval_s=-1)
+
+
+class TestPathCoercion:
+    """Tests for Path coercion from YAML strings."""
+
+    def test_data_dir_string_coerced_to_path(self, tmp_path: Path) -> None:
+        """String data_dir from YAML is coerced to Path."""
+        yaml_file = tmp_path / "paths.yaml"
+        yaml_file.write_text(
+            "data_dir: data\nkill_switch_path: config/kill_switch.txt\n", encoding="utf-8"
+        )
+        config = load_config(yaml_file)
+
+        assert isinstance(config.data_dir, Path)
+        assert isinstance(config.kill_switch_path, Path)
+        assert str(config.data_dir).endswith("data")
+        assert str(config.kill_switch_path).endswith("kill_switch.txt")
+
+    def test_storage_db_path_string_coerced_to_path(self, tmp_path: Path) -> None:
+        """String db_path in storage from YAML is coerced to Path."""
+        yaml_file = tmp_path / "storage.yaml"
+        yaml_file.write_text("storage:\n  db_path: data/my_events.db\n", encoding="utf-8")
+        config = load_config(yaml_file)
+
+        assert isinstance(config.storage.db_path, Path)
+        assert str(config.storage.db_path).endswith("my_events.db")
+
+    def test_path_objects_still_accepted(self) -> None:
+        """Path objects are accepted directly."""
+        config = AppConfig(
+            data_dir=Path("custom/data"),
+            kill_switch_path=Path("custom/kill.txt"),
+        )
+        assert config.data_dir == Path("custom/data")
+        assert config.kill_switch_path == Path("custom/kill.txt")

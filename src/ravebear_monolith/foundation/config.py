@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, PositiveInt, ValidationError
+from pydantic import BaseModel, PositiveInt, ValidationError, field_validator
 
 from ravebear_monolith.util.errors import ConfigError
 
@@ -20,6 +20,12 @@ class StorageConfig(BaseModel, extra="forbid"):
     """Storage configuration."""
 
     db_path: Path = Path("data/events.db")
+
+    @field_validator("db_path", mode="before")
+    @classmethod
+    def coerce_db_path(cls, v: str | Path) -> Path:
+        """Coerce string to Path."""
+        return Path(v) if isinstance(v, str) else v
 
 
 class AppConfig(BaseModel, strict=True, extra="forbid"):
@@ -50,6 +56,12 @@ class AppConfig(BaseModel, strict=True, extra="forbid"):
 
     # Storage settings
     storage: StorageConfig = StorageConfig()
+
+    @field_validator("data_dir", "kill_switch_path", mode="before")
+    @classmethod
+    def coerce_paths(cls, v: str | Path) -> Path:
+        """Coerce string values from YAML to Path objects."""
+        return Path(v) if isinstance(v, str) else v
 
 
 def load_config(path: Path) -> AppConfig:
