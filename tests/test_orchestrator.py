@@ -1,6 +1,7 @@
 """Tests for orchestrator lifecycle."""
 
 import asyncio
+import json
 
 import pytest
 
@@ -48,9 +49,16 @@ class TestOrchestratorRun:
         assert result == 0
 
     @pytest.mark.asyncio
-    async def test_run_prints_heartbeat(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """Orchestrator prints heartbeat messages."""
-        config = AppConfig(app_name="TestApp", heartbeat_interval_s=1)
+    async def test_run_logs_structured_json(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Orchestrator logs structured JSON with events."""
+        config = AppConfig(app_name="TestApp", heartbeat_interval_s=1, log_level="DEBUG")
         await run(config, max_beats=1)
         captured = capsys.readouterr()
-        assert "heartbeat [TestApp]" in captured.out
+
+        # Parse JSON lines from output
+        lines = [line for line in captured.out.strip().split("\n") if line]
+        assert len(lines) >= 1
+
+        # Check for orchestrator_start event
+        events = [json.loads(line)["event"] for line in lines]
+        assert "orchestrator_start" in events
