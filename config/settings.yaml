@@ -23,3 +23,7 @@ max_events_per_run: null
 okx:
   inst_id: BTC-USDT
   ws_url: wss://ws.okx.com:8443/ws/v5/public
+
+# Storage configuration
+storage:
+  db_path: data/events.db

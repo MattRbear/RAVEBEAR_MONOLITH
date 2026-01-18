@@ -16,6 +16,12 @@ class OKXConfig(BaseModel, extra="forbid"):
     ws_url: str = "wss://ws.okx.com:8443/ws/v5/public"
 
 
+class StorageConfig(BaseModel, extra="forbid"):
+    """Storage configuration."""
+
+    db_path: Path = Path("data/events.db")
+
+
 class AppConfig(BaseModel, strict=True, extra="forbid"):
     """Application configuration with strict type validation.
 
@@ -41,6 +47,9 @@ class AppConfig(BaseModel, strict=True, extra="forbid"):
 
     # Exchange-specific configs
     okx: OKXConfig = OKXConfig()
+
+    # Storage settings
+    storage: StorageConfig = StorageConfig()
 
 
 def load_config(path: Path) -> AppConfig:
