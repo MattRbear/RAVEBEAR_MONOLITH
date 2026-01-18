@@ -1,9 +1,19 @@
 """Shared pytest fixtures for all tests."""
 
 import logging
+import os
+import warnings
 from collections.abc import Generator
 
 import pytest
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Configure strict warnings if RAVEBEAR_STRICT_TESTS is set."""
+    if os.environ.get("RAVEBEAR_STRICT_TESTS") == "1":
+        # Make these specific warnings fatal
+        warnings.filterwarnings("error", category=pytest.PytestUnhandledThreadExceptionWarning)
+        warnings.filterwarnings("error", category=ResourceWarning)
 
 
 @pytest.fixture(scope="session", autouse=True)
