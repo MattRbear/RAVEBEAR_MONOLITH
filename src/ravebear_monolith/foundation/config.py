@@ -28,6 +28,10 @@ class AppConfig(BaseModel, strict=True, extra="forbid"):
     min_python_major: PositiveInt = 3
     min_python_minor: PositiveInt = 12
 
+    # Collector settings
+    collectors_enabled: list[str] = []
+    max_events_per_run: int | None = None
+
 
 def load_config(path: Path) -> AppConfig:
     """Load and validate configuration from a YAML file.

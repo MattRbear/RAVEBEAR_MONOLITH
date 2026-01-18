@@ -13,3 +13,7 @@ kill_switch_path: config/kill_switch.txt
 min_free_disk_mb: 2048
 min_python_major: 3
 min_python_minor: 12
+
+# Collector settings
+collectors_enabled: []
+max_events_per_run: null
