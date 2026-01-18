@@ -1,10 +1,12 @@
 """OKX trades to 1-second bars stateful processor.
 
 Aggregates trade events into OHLCV bars, flushing on bucket rollover.
+Bars are deterministic regardless of input trade order.
 """
 
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 
 from ravebear_monolith.core.processor import ProcessorBase, ProcessResult
@@ -15,38 +17,65 @@ from ravebear_monolith.util.logging import log_event
 logger = logging.getLogger(__name__)
 
 
-class BucketState:
-    """In-memory state for a single 1-second bucket."""
+@dataclass
+class TradeRecord:
+    """Single trade record for deterministic OHLC computation."""
 
-    def __init__(self, symbol: str, ts_ms: int, first_price: float) -> None:
+    sort_key: tuple[int, str]  # (trade_ts_ms, event_id)
+    price: float
+    size: float
+
+
+class BucketState:
+    """In-memory state for a single 1-second bucket.
+
+    Collects trades and computes deterministic OHLC based on sorted order.
+    """
+
+    def __init__(self, symbol: str, ts_ms: int) -> None:
         self.symbol = symbol
         self.ts_ms = ts_ms  # Bucket start (floored to 1s)
-        self.open = first_price
-        self.high = first_price
-        self.low = first_price
-        self.close = first_price
-        self.volume = 0.0
-        self.trade_count = 0
+        self._trades: list[TradeRecord] = []
 
-    def add_trade(self, price: float, size: float) -> None:
+    def add_trade(self, trade: TradeRecord) -> None:
         """Add a trade to the bucket."""
-        self.high = max(self.high, price)
-        self.low = min(self.low, price)
-        self.close = price
-        self.volume += size
-        self.trade_count += 1
+        self._trades.append(trade)
+
+    @property
+    def trade_count(self) -> int:
+        """Number of trades in bucket."""
+        return len(self._trades)
 
     def to_bar(self) -> Bar1s:
-        """Convert bucket state to Bar1s."""
+        """Convert bucket state to Bar1s with deterministic OHLC.
+
+        OPEN = price of trade with min(sort_key)
+        CLOSE = price of trade with max(sort_key)
+        HIGH = max(price)
+        LOW = min(price)
+        VOLUME = sum(size)
+        """
+        if not self._trades:
+            raise ValueError("Cannot create bar from empty bucket")
+
+        # Sort trades by (trade_ts_ms, event_id)
+        sorted_trades = sorted(self._trades, key=lambda t: t.sort_key)
+
+        open_price = sorted_trades[0].price
+        close_price = sorted_trades[-1].price
+        high_price = max(t.price for t in self._trades)
+        low_price = min(t.price for t in self._trades)
+        volume = sum(t.size for t in self._trades)
+
         return Bar1s(
             symbol=self.symbol,
             ts_ms=self.ts_ms,
-            open=self.open,
-            high=self.high,
-            low=self.low,
-            close=self.close,
-            volume=self.volume,
-            trade_count=self.trade_count,
+            open=open_price,
+            high=high_price,
+            low=low_price,
+            close=close_price,
+            volume=volume,
+            trade_count=len(self._trades),
         )
 
 
@@ -54,6 +83,7 @@ class TradesToBars1sProcessor(ProcessorBase):
     """Stateful processor that aggregates trades into 1-second bars.
 
     Maintains in-memory bucket per symbol and flushes on rollover.
+    Bars are deterministic regardless of trade arrival order.
 
     Args:
         db_path: Path to SQLite database for BarSink.
@@ -114,6 +144,15 @@ class TradesToBars1sProcessor(ProcessorBase):
                 return ProcessResult(ok=False, reason="Missing size in payload")
             size = float(size_raw)
 
+            # Trade timestamp: use payload ts if present, else event.ts_ms
+            trade_ts_ms = payload.get("trade_ts_ms")
+            if trade_ts_ms is None:
+                trade_ts_ms = payload.get("ts")
+            if trade_ts_ms is not None:
+                trade_ts_ms = int(trade_ts_ms)
+            else:
+                trade_ts_ms = event.ts_ms
+
         except (ValueError, TypeError) as e:
             return ProcessResult(ok=False, reason=f"Invalid payload fields: {e}")
 
@@ -126,7 +165,7 @@ class TradesToBars1sProcessor(ProcessorBase):
 
         if current_bucket is None:
             # First trade for this symbol
-            current_bucket = BucketState(symbol, bucket_ts_ms, price)
+            current_bucket = BucketState(symbol, bucket_ts_ms)
             self._buckets[symbol] = current_bucket
         elif current_bucket.ts_ms != bucket_ts_ms:
             # Bucket rollover - flush previous
@@ -140,11 +179,16 @@ class TradesToBars1sProcessor(ProcessorBase):
                 ts_ms=current_bucket.ts_ms,
             )
             # Start new bucket
-            current_bucket = BucketState(symbol, bucket_ts_ms, price)
+            current_bucket = BucketState(symbol, bucket_ts_ms)
             self._buckets[symbol] = current_bucket
 
-        # Add trade to current bucket
-        current_bucket.add_trade(price, size)
+        # Create trade record with sort key for deterministic OHLC
+        trade = TradeRecord(
+            sort_key=(trade_ts_ms, event.id),
+            price=price,
+            size=size,
+        )
+        current_bucket.add_trade(trade)
 
         return ProcessResult(ok=True)
 
