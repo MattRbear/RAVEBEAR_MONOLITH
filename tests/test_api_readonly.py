@@ -70,7 +70,7 @@ def seeded_db(tmp_path: Path) -> Path:
         bars.extend([make_bar("ETH-USDT", 1000 * (i + 1), 2000 + i * 5) for i in range(3)])
         await seed_bars(db_path, bars)
 
-    asyncio.get_event_loop().run_until_complete(seed())
+    asyncio.run(seed())
     return db_path
 
 
