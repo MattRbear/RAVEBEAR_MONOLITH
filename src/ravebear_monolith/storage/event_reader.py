@@ -168,11 +168,12 @@ class EventReader:
         where_clause = " AND ".join(conditions) if conditions else "1=1"
         order_dir = "ASC" if spec.order == "asc" else "DESC"
 
+        # Secondary ORDER BY id ensures deterministic ordering for replayer
         sql = f"""
             SELECT id, ts, source, type, payload_json, content_hash
             FROM events
             WHERE {where_clause}
-            ORDER BY ts {order_dir}
+            ORDER BY ts {order_dir}, id {order_dir}
             LIMIT ?
         """
         params.append(spec.limit)

@@ -55,6 +55,16 @@ class EventSink:
             )
         """)
 
+        # Create replay_cursors table for restart-safe processing
+        await self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS replay_cursors (
+                name TEXT PRIMARY KEY,
+                last_ts_ms INTEGER NOT NULL,
+                last_event_id TEXT NOT NULL,
+                updated_ts_ms INTEGER NOT NULL
+            )
+        """)
+
         # Create indexes for common queries
         await self._conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_events_source_type
