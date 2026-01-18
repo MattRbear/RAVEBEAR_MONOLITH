@@ -6,6 +6,17 @@ from collections.abc import Generator
 import pytest
 
 
+@pytest.fixture(scope="session", autouse=True)
+def disable_logging_exceptions() -> Generator[None, None, None]:
+    """Disable logging exception raising under pytest to prevent closed-stream errors."""
+    original = logging.raiseExceptions
+    logging.raiseExceptions = False
+    yield
+    logging.raiseExceptions = original
+    # Final shutdown of logging
+    logging.shutdown()
+
+
 @pytest.fixture(autouse=True)
 def reset_logging_handlers() -> Generator[None, None, None]:
     """Reset logging handlers after each test to prevent file handle leaks."""

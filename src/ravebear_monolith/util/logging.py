@@ -85,6 +85,27 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(log_entry)
 
 
+class SafeStreamHandler(logging.StreamHandler):
+    """StreamHandler that silently ignores writes to closed streams.
+
+    Prevents ValueError: I/O operation on closed file during pytest teardown.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Emit a record, silently ignoring closed stream errors."""
+        try:
+            stream = self.stream
+            if stream is None or getattr(stream, "closed", False):
+                return
+            super().emit(record)
+        except ValueError:
+            # Stream was closed between check and write - ignore
+            pass
+        except Exception:
+            # Don't let logging errors crash the application
+            self.handleError(record)
+
+
 def configure_logging(config: AppConfig) -> None:
     """Configure structured JSON logging.
 
@@ -96,8 +117,8 @@ def configure_logging(config: AppConfig) -> None:
     # Clear existing handlers
     root_logger.handlers.clear()
 
-    # Create JSON handler for stdout
-    handler = logging.StreamHandler(sys.stdout)
+    # Create safe JSON handler for stdout
+    handler = SafeStreamHandler(sys.stdout)
     handler.setFormatter(JsonFormatter())
 
     root_logger.addHandler(handler)
