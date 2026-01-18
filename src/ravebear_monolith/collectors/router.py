@@ -7,6 +7,7 @@ Provides:
 
 import asyncio
 import logging
+from collections.abc import AsyncGenerator
 from pathlib import Path
 
 from ravebear_monolith.collectors.base import CollectorBase, CollectorEvent
@@ -237,3 +238,107 @@ class CollectorRouter:
     def stop(self) -> None:
         """Signal the router to stop."""
         self._running = False
+
+    async def events(self, max_events: int | None = None) -> AsyncGenerator[CollectorEvent, None]:
+        """Async generator that yields events from collectors.
+
+        This allows external code (like orchestrator) to process events
+        without the router owning storage.
+
+        Args:
+            max_events: Maximum events to yield. None for unlimited.
+
+        Yields:
+            CollectorEvent from collectors.
+        """
+        self._running = True
+        self._event_count = 0
+
+        log_event(
+            logger,
+            logging.INFO,
+            f"Router starting with {len(self._collectors)} collectors",
+            event="router_start",
+            collector_count=len(self._collectors),
+        )
+
+        try:
+            await self.start_collectors()
+
+            while self._running:
+                # Check kill switch
+                if self._kill_switch.should_halt():
+                    log_event(
+                        logger,
+                        logging.WARNING,
+                        "Kill switch triggered",
+                        event="kill_switch_triggered",
+                        reason=self._kill_switch.reason(),
+                    )
+                    return
+
+                # Check max events
+                if max_events is not None and self._event_count >= max_events:
+                    log_event(
+                        logger,
+                        logging.INFO,
+                        f"Max events reached: {max_events}",
+                        event="router_max_events",
+                        max_events=max_events,
+                    )
+                    return
+
+                # Collect from all collectors (round-robin)
+                exhausted_count = 0
+                for collector in self._collectors:
+                    # Rate limit check
+                    if "collector" in self._budget:
+                        await self._budget.get("collector").acquire()
+
+                    event = await self._get_event_with_retry(collector)
+                    if event:
+                        self._event_count += 1
+                        log_event(
+                            logger,
+                            logging.DEBUG,
+                            f"Event from {collector.name}: {event.event_type}",
+                            event="collector_event",
+                            collector=collector.name,
+                            event_type=event.event_type,
+                            source=event.source,
+                        )
+                        yield event
+
+                        # Check max events after each event
+                        if max_events is not None and self._event_count >= max_events:
+                            return
+                    else:
+                        exhausted_count += 1
+
+                # If all collectors returned None, they're exhausted - stop
+                if exhausted_count == len(self._collectors) and len(self._collectors) > 0:
+                    log_event(
+                        logger,
+                        logging.INFO,
+                        "All collectors exhausted",
+                        event="router_exhausted",
+                    )
+                    return
+
+                # If no events from any collector, yield control briefly
+                if exhausted_count == len(self._collectors):
+                    await asyncio.sleep(0.01)
+
+        except asyncio.CancelledError:
+            log_event(logger, logging.INFO, "Router cancelled", event="router_cancelled")
+            raise
+        finally:
+            self._running = False
+            await self.stop_collectors()
+            log_event(
+                logger,
+                logging.INFO,
+                f"Router stopped, processed {self._event_count} events",
+                event="router_stop",
+                event_count=self._event_count,
+            )
