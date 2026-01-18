@@ -21,6 +21,13 @@ class AppConfig(BaseModel, strict=True, extra="forbid"):
     shutdown_timeout_s: PositiveInt = 5
     heartbeat_interval_s: PositiveInt = 5
 
+    # Health check settings
+    data_dir: Path = Path("data")
+    kill_switch_path: Path = Path("config/kill_switch.txt")
+    min_free_disk_mb: PositiveInt = 2048
+    min_python_major: PositiveInt = 3
+    min_python_minor: PositiveInt = 12
+
 
 def load_config(path: Path) -> AppConfig:
     """Load and validate configuration from a YAML file.

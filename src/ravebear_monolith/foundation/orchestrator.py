@@ -1,4 +1,4 @@
-"""Orchestrator skeleton with lifecycle management and structured logging."""
+"""Orchestrator skeleton with lifecycle management, structured logging, and health checks."""
 
 import argparse
 import asyncio
@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 
 from ravebear_monolith.foundation.config import AppConfig, load_config
+from ravebear_monolith.util.health import collect_health_snapshot
+from ravebear_monolith.util.kill_switch import KillSwitch
 from ravebear_monolith.util.logging import configure_logging, log_event
 
 logger = logging.getLogger(__name__)
@@ -21,17 +23,47 @@ async def run(config: AppConfig, *, max_beats: int | None = None) -> int:
                    If None, runs indefinitely until cancelled.
 
     Returns:
-        0 on clean shutdown.
+        0 on clean shutdown, 2 on kill switch triggered.
     """
     # Configure logging at startup
     configure_logging(config)
 
     log_event(logger, logging.INFO, f"Starting {config.app_name}", event="orchestrator_start")
 
+    # Collect and log health snapshot
+    health = collect_health_snapshot(
+        data_dir=config.data_dir,
+        min_free_disk_mb=config.min_free_disk_mb,
+        min_python_major=config.min_python_major,
+        min_python_minor=config.min_python_minor,
+    )
+    log_event(
+        logger,
+        logging.INFO,
+        f"Health check: {'OK' if health.ok else 'DEGRADED'}",
+        event="health_snapshot",
+        ok=health.ok,
+        checks=health.checks,
+    )
+
+    # Initialize kill switch
+    kill_switch = KillSwitch(config.kill_switch_path)
+
     beat_count = 0
 
     try:
         while True:
+            # Check kill switch each heartbeat
+            if kill_switch.should_halt():
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "Kill switch triggered",
+                    event="kill_switch_triggered",
+                    reason=kill_switch.reason(),
+                )
+                return 2
+
             log_event(
                 logger,
                 logging.DEBUG,

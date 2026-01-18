@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
@@ -13,16 +14,16 @@ class TestOrchestratorRun:
     """Tests for the orchestrator run function."""
 
     @pytest.mark.asyncio
-    async def test_run_completes_with_max_beats(self) -> None:
+    async def test_run_completes_with_max_beats(self, tmp_path: Path) -> None:
         """Orchestrator exits cleanly when max_beats is reached."""
-        config = AppConfig(heartbeat_interval_s=1)
+        config = AppConfig(heartbeat_interval_s=1, data_dir=tmp_path)
         result = await run(config, max_beats=2)
         assert result == 0
 
     @pytest.mark.asyncio
-    async def test_run_handles_cancellation(self) -> None:
+    async def test_run_handles_cancellation(self, tmp_path: Path) -> None:
         """Orchestrator handles cancellation gracefully."""
-        config = AppConfig(heartbeat_interval_s=1)
+        config = AppConfig(heartbeat_interval_s=1, data_dir=tmp_path)
 
         async def cancel_after_delay() -> int:
             task = asyncio.create_task(run(config))
@@ -37,9 +38,9 @@ class TestOrchestratorRun:
         assert result == 0
 
     @pytest.mark.asyncio
-    async def test_run_does_not_hang(self) -> None:
+    async def test_run_does_not_hang(self, tmp_path: Path) -> None:
         """Orchestrator with max_beats does not hang."""
-        config = AppConfig(heartbeat_interval_s=1)
+        config = AppConfig(heartbeat_interval_s=1, data_dir=tmp_path)
 
         async def bounded_run() -> int:
             return await run(config, max_beats=1)
@@ -49,9 +50,16 @@ class TestOrchestratorRun:
         assert result == 0
 
     @pytest.mark.asyncio
-    async def test_run_logs_structured_json(self, capsys: pytest.CaptureFixture[str]) -> None:
+    async def test_run_logs_structured_json(
+        self, capsys: pytest.CaptureFixture[str], tmp_path: Path
+    ) -> None:
         """Orchestrator logs structured JSON with events."""
-        config = AppConfig(app_name="TestApp", heartbeat_interval_s=1, log_level="DEBUG")
+        config = AppConfig(
+            app_name="TestApp",
+            heartbeat_interval_s=1,
+            log_level="DEBUG",
+            data_dir=tmp_path,
+        )
         await run(config, max_beats=1)
         captured = capsys.readouterr()
 
@@ -62,3 +70,41 @@ class TestOrchestratorRun:
         # Check for orchestrator_start event
         events = [json.loads(line)["event"] for line in lines]
         assert "orchestrator_start" in events
+
+    @pytest.mark.asyncio
+    async def test_run_logs_health_snapshot(
+        self, capsys: pytest.CaptureFixture[str], tmp_path: Path
+    ) -> None:
+        """Orchestrator logs health snapshot at startup."""
+        config = AppConfig(heartbeat_interval_s=1, log_level="DEBUG", data_dir=tmp_path)
+        await run(config, max_beats=1)
+        captured = capsys.readouterr()
+
+        lines = [line for line in captured.out.strip().split("\n") if line]
+        events = [json.loads(line)["event"] for line in lines]
+        assert "health_snapshot" in events
+
+    @pytest.mark.asyncio
+    async def test_kill_switch_returns_2(self, tmp_path: Path) -> None:
+        """Kill switch triggered returns exit code 2."""
+        kill_file = tmp_path / "kill_switch.txt"
+        kill_file.write_text("KILL", encoding="utf-8")
+
+        config = AppConfig(
+            heartbeat_interval_s=1,
+            data_dir=tmp_path,
+            kill_switch_path=kill_file,
+        )
+        result = await run(config, max_beats=5)
+        assert result == 2
+
+    @pytest.mark.asyncio
+    async def test_no_kill_switch_returns_0(self, tmp_path: Path) -> None:
+        """No kill switch file means normal exit code 0."""
+        config = AppConfig(
+            heartbeat_interval_s=1,
+            data_dir=tmp_path,
+            kill_switch_path=tmp_path / "nonexistent.txt",
+        )
+        result = await run(config, max_beats=1)
+        assert result == 0

@@ -6,3 +6,10 @@ environment: dev
 log_level: INFO
 shutdown_timeout_s: 5
 heartbeat_interval_s: 5
+
+# Health check settings
+data_dir: data
+kill_switch_path: config/kill_switch.txt
+min_free_disk_mb: 2048
+min_python_major: 3
+min_python_minor: 12
