@@ -28,10 +28,12 @@ packages = [{ include = "ravebear_monolith", from = "src" }]
 monolith = "ravebear_monolith.cli:main"
 
 [tool.pytest.ini_options]
-addopts = "-q --basetemp=.pytest_temp"
+addopts = "-q"
 testpaths = ["tests"]
 pythonpath = ["src"]
 asyncio_mode = "auto"
+tmp_path_retention_policy = "none"
+tmp_path_retention_count = 0
 
 [tool.ruff]
 line-length = 100
