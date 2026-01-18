@@ -1,0 +1,1 @@
+"""OKX collector package."""

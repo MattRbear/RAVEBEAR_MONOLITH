@@ -15,5 +15,6 @@ min_python_major: 3
 min_python_minor: 12
 
 # Collector settings
-collectors_enabled: []
+collectors_enabled:
+  - okx_trades_dry
 max_events_per_run: null

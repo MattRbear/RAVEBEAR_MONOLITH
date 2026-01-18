@@ -178,6 +178,7 @@ class CollectorRouter:
 
                 # Collect from all collectors (round-robin)
                 events_this_round = 0
+                exhausted_count = 0
                 for collector in self._collectors:
                     # Rate limit check
                     if "collector" in self._budget:
@@ -200,6 +201,18 @@ class CollectorRouter:
                         # Check max events after each event
                         if max_events is not None and self._event_count >= max_events:
                             break
+                    else:
+                        exhausted_count += 1
+
+                # If all collectors returned None, they're exhausted - stop
+                if exhausted_count == len(self._collectors) and len(self._collectors) > 0:
+                    log_event(
+                        logger,
+                        logging.INFO,
+                        "All collectors exhausted",
+                        event="router_exhausted",
+                    )
+                    break
 
                 # If no events from any collector, yield control briefly
                 if events_this_round == 0:
