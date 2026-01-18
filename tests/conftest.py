@@ -13,6 +13,7 @@ def pytest_configure(config: pytest.Config) -> None:
     if os.environ.get("RAVEBEAR_STRICT_TESTS") == "1":
         # Make these specific warnings fatal
         warnings.filterwarnings("error", category=pytest.PytestUnhandledThreadExceptionWarning)
+        warnings.filterwarnings("error", category=pytest.PytestUnraisableExceptionWarning)
         warnings.filterwarnings("error", category=ResourceWarning)
 
 

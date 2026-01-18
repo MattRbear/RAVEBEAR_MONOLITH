@@ -2,13 +2,16 @@
 
 from pathlib import Path
 
-from ravebear_monolith.runtime.main import run
+import pytest
+
+from ravebear_monolith.runtime.main import _run_lifecycle
 
 
 class TestRuntimeBoot:
     """Tests for runtime boot sequence."""
 
-    def test_run_exits_cleanly(self, tmp_path: Path) -> None:
+    @pytest.mark.asyncio
+    async def test_run_exits_cleanly(self, tmp_path: Path) -> None:
         """run() exits cleanly with exit code 0."""
         # Create minimal valid config
         config_file = tmp_path / "test_config.yaml"
@@ -17,15 +20,16 @@ class TestRuntimeBoot:
             encoding="utf-8",
         )
 
-        exit_code = run(config_path=config_file, max_beats=1)
+        exit_code = await _run_lifecycle(config_path=config_file, max_beats=1)
 
         assert exit_code == 0
 
-    def test_run_no_exceptions(self, tmp_path: Path) -> None:
+    @pytest.mark.asyncio
+    async def test_run_no_exceptions(self, tmp_path: Path) -> None:
         """run() completes without raising exceptions."""
         config_file = tmp_path / "test_config.yaml"
         config_file.write_text("", encoding="utf-8")  # Empty = use defaults
 
         # Should not raise
-        exit_code = run(config_path=config_file, max_beats=1)
+        exit_code = await _run_lifecycle(config_path=config_file, max_beats=1)
         assert exit_code == 0

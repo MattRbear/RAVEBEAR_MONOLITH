@@ -1,5 +1,7 @@
 """Tests for collector base contract."""
 
+import pytest
+
 from ravebear_monolith.collectors.base import CollectorBase, CollectorEvent
 
 
@@ -61,6 +63,7 @@ class TestCollectorBase:
         collector = FakeCollector("test_collector")
         assert collector.name == "test_collector"
 
+    @pytest.mark.asyncio
     async def test_start_stop(self) -> None:
         """Collector can be started and stopped."""
         collector = FakeCollector("test")
@@ -72,6 +75,7 @@ class TestCollectorBase:
         await collector.stop()
         assert not collector.is_running
 
+    @pytest.mark.asyncio
     async def test_next_event(self) -> None:
         """Collector returns events from next_event."""
         event = CollectorEvent.create("test", "trade", {"price": 100})
@@ -83,6 +87,7 @@ class TestCollectorBase:
         assert result is not None
         assert result.event_type == "trade"
 
+    @pytest.mark.asyncio
     async def test_next_event_empty(self) -> None:
         """Collector returns None when no events."""
         collector = FakeCollector("test")
