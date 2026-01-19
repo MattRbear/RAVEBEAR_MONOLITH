@@ -219,10 +219,161 @@ class TestOKXTradesLiveCollector:
     @pytest.mark.asyncio
     async def test_handles_connection_error(self) -> None:
         """Collector handles connection errors gracefully."""
-        with patch("websockets.connect", side_effect=ConnectionRefusedError("refused")):
+        # First call raises, simulating initial connect failure that triggers reconnect
+        # We need to stop the collector to avoid infinite reconnect loop
+        call_count = 0
+
+        async def connect_raises(*args: object, **kwargs: object) -> MockWebSocket:
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 2:
+                raise ConnectionRefusedError("refused")
+            # After 2 failures, return a valid mock that closes immediately
+            return MockWebSocket([])
+
+        with patch("websockets.connect", side_effect=connect_raises):
             collector = OKXTradesLiveCollector()
+            await collector.start()
 
-            with pytest.raises(ConnectionRefusedError):
-                await collector.start()
+            # Wait for reconnect attempts (backoff is 0.5s for first retry)
+            await asyncio.sleep(0.8)
 
+            # Stop the collector
+            await collector.stop()
+
+            # Should have attempted at least 2 connections
+            assert call_count >= 2
+
+
+class TestOKXReconnect:
+    """Tests for OKX WebSocket reconnect behavior."""
+
+    @pytest.mark.asyncio
+    async def test_reconnects_after_disconnect(self) -> None:
+        """Collector reconnects and continues yielding events after disconnect."""
+        # Track connection attempts
+        connect_count = 0
+        messages_batch_1 = [make_trade_message("BTC-USDT", "1", "42000", "0.1", "buy")]
+        messages_batch_2 = [make_trade_message("BTC-USDT", "2", "42001", "0.2", "sell")]
+
+        async def connect_mock(*args: object, **kwargs: object) -> MockWebSocket:
+            nonlocal connect_count
+            connect_count += 1
+            if connect_count == 1:
+                # First connection: return messages then disconnect
+                return MockWebSocket(messages_batch_1)
+            else:
+                # Second connection: return more messages
+                return MockWebSocket(messages_batch_2)
+
+        with patch("websockets.connect", side_effect=connect_mock):
+            collector = OKXTradesLiveCollector()
+            await collector.start()
+
+            # Wait for first message
+            await asyncio.sleep(0.2)
+            event1 = await collector.next_event()
+            assert event1 is not None
+            assert event1.payload["trade_id"] == "1"
+
+            # Wait for reconnect + second message
+            # Backoff starts at 0.5s, so we need to wait a bit longer
+            await asyncio.sleep(0.8)
+            event2 = await collector.next_event()
+            assert event2 is not None
+            assert event2.payload["trade_id"] == "2"
+
+            await collector.stop()
+
+        # Should have connected at least twice
+        assert connect_count >= 2
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_stops_immediately(self) -> None:
+        """CancelledError stops collector without further reconnect attempts."""
+        connect_count = 0
+
+        async def connect_mock(*args: object, **kwargs: object) -> MockWebSocket:
+            nonlocal connect_count
+            connect_count += 1
+            return MockWebSocket([])
+
+        with patch("websockets.connect", side_effect=connect_mock):
+            collector = OKXTradesLiveCollector()
+            await collector.start()
+
+            # Let it connect
+            await asyncio.sleep(0.1)
+            initial_count = connect_count
+
+            # Stop the collector (sends CancelledError to receiver task)
+            await collector.stop()
+
+            # Give time for any errant reconnects
+            await asyncio.sleep(0.3)
+
+            # Should not have reconnected after stop
+            assert connect_count == initial_count
             assert not collector.is_running
+
+    @pytest.mark.asyncio
+    async def test_reconnects_on_connection_refused(self) -> None:
+        """Collector reconnects on ConnectionRefusedError."""
+        connect_count = 0
+
+        async def connect_mock(*args: object, **kwargs: object) -> MockWebSocket:
+            nonlocal connect_count
+            connect_count += 1
+            if connect_count == 1:
+                raise ConnectionRefusedError("refused")
+            # Success on second attempt
+            return MockWebSocket([make_trade_message("BTC-USDT", "1", "42000", "0.1", "buy")])
+
+        with patch("websockets.connect", side_effect=connect_mock):
+            collector = OKXTradesLiveCollector()
+            await collector.start()
+
+            # Wait for reconnect (initial backoff is 0.5s + jitter)
+            await asyncio.sleep(0.8)
+
+            event = await collector.next_event()
+            assert event is not None
+            assert event.payload["trade_id"] == "1"
+
+            await collector.stop()
+
+        assert connect_count >= 2
+
+    @pytest.mark.asyncio
+    async def test_backoff_increases_on_repeated_failures(self) -> None:
+        """Backoff increases exponentially on repeated connection failures."""
+        connect_times: list[float] = []
+        import time
+
+        async def connect_mock(*args: object, **kwargs: object) -> MockWebSocket:
+            connect_times.append(time.monotonic())
+            if len(connect_times) < 4:
+                raise ConnectionRefusedError("refused")
+            # Success on 4th attempt
+            return MockWebSocket([make_trade_message("BTC-USDT", "1", "42000", "0.1", "buy")])
+
+        with patch("websockets.connect", side_effect=connect_mock):
+            collector = OKXTradesLiveCollector()
+            await collector.start()
+
+            # Wait for successful connection after retries
+            # 0.5 + 1.0 + 2.0 = 3.5s minimum, plus some margin
+            await asyncio.sleep(4.5)
+
+            await collector.stop()
+
+        # Should have 4 connection attempts
+        assert len(connect_times) >= 4
+
+        # Verify backoff increased (each gap should be roughly 2x previous)
+        # Gap 1: ~0.5s, Gap 2: ~1.0s, Gap 3: ~2.0s
+        if len(connect_times) >= 3:
+            gap1 = connect_times[1] - connect_times[0]
+            gap2 = connect_times[2] - connect_times[1]
+            # Second gap should be larger than first (exponential)
+            assert gap2 > gap1 * 1.5  # Allow for jitter variance
