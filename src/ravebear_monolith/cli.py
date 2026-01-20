@@ -116,12 +116,12 @@ async def _run_orchestrator_async(argv: list[str] | None = None) -> int:
 def cli_main(argv: list[str] | None = None) -> int:
     """Main CLI entry point with graceful shutdown.
 
-    Handles KeyboardInterrupt as fallback for Windows.
+    Handles KeyboardInterrupt and CancelledError as fallback for Windows.
     """
     try:
         return asyncio.run(_run_orchestrator_async(argv))
-    except KeyboardInterrupt:
-        # Windows fallback - KeyboardInterrupt is raised instead of signal
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        # Windows fallback - KeyboardInterrupt/CancelledError instead of signal
         return 130
 
 
