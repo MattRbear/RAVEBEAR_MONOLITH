@@ -283,43 +283,93 @@ async def run_live_with_processing(
         )
         return 1
 
-    # Initialize router
-    budget_registry = BudgetRegistry()
-    router = CollectorRouter(
-        collectors=collectors,
-        budget_registry=budget_registry,
-        kill_switch_path=config.kill_switch_path,
-    )
+    # Backoff settings for collector restart
+    _INITIAL_BACKOFF_S = 0.5
+    _MAX_BACKOFF_S = 30.0
+    _BACKOFF_JITTER = 0.10
 
     # Track result code
     result_code = 0
 
     async def collector_loop() -> None:
-        """Collect events from router and write to sink."""
+        """Collect events from router with restart on exhaustion.
+
+        Runs indefinitely until kill switch or cancellation.
+        Restarts router with exponential backoff on exhaustion or error.
+        """
+        import random
+
         nonlocal result_code
-        try:
-            async for event in router.events(max_events=max_events):
-                try:
-                    await event_sink.write(event)
-                except Exception as e:
-                    log_event(
-                        logger,
-                        logging.ERROR,
-                        f"Event sink write failed: {e}",
-                        event="event_sink_write_failed",
-                        error=str(e),
-                    )
-                    trigger_kill_switch(
-                        config.kill_switch_path,
-                        f"EventSink write failed: {e}",
-                    )
-                    result_code = 2
-                    return
-        except asyncio.CancelledError:
-            log_event(
-                logger, logging.DEBUG, "Collector loop cancelled", event="collector_cancelled"
+        backoff_s = _INITIAL_BACKOFF_S
+
+        while not kill_switch.should_halt():
+            # Create fresh router for each run
+            budget_registry = BudgetRegistry()
+            router = CollectorRouter(
+                collectors=collectors,
+                budget_registry=budget_registry,
+                kill_switch_path=config.kill_switch_path,
             )
-            raise
+
+            events_received = 0
+            try:
+                async for event in router.events(max_events=max_events):
+                    try:
+                        await event_sink.write(event)
+                        events_received += 1
+                    except Exception as e:
+                        log_event(
+                            logger,
+                            logging.ERROR,
+                            f"Event sink write failed: {e}",
+                            event="event_sink_write_failed",
+                            error=str(e),
+                        )
+                        trigger_kill_switch(
+                            config.kill_switch_path,
+                            f"EventSink write failed: {e}",
+                        )
+                        result_code = 2
+                        return
+
+                # Router exhausted - log and restart with backoff
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    f"Collectors exhausted after {events_received} events, will restart",
+                    event="collectors_exhausted",
+                    events_received=events_received,
+                    backoff_s=round(backoff_s, 2),
+                )
+
+            except asyncio.CancelledError:
+                log_event(
+                    logger, logging.DEBUG, "Collector loop cancelled", event="collector_cancelled"
+                )
+                raise
+            except Exception as e:
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    f"Collector error, will restart: {e}",
+                    event="collector_error",
+                    error=str(e),
+                    backoff_s=round(backoff_s, 2),
+                )
+
+            # Reset backoff if we received events
+            if events_received > 0:
+                backoff_s = _INITIAL_BACKOFF_S
+            else:
+                # Apply jitter and sleep before restart
+                jitter = 1 + random.uniform(-_BACKOFF_JITTER, _BACKOFF_JITTER)
+                sleep_time = backoff_s * jitter
+                try:
+                    await asyncio.sleep(sleep_time)
+                except asyncio.CancelledError:
+                    raise
+                # Exponential backoff for next attempt
+                backoff_s = min(backoff_s * 2, _MAX_BACKOFF_S)
 
     async def processing_loop() -> None:
         """Continuously replay new events into bars."""
@@ -403,7 +453,6 @@ async def run_live_with_processing(
             logging.INFO,
             "Live-with-processing complete",
             event="orchestrator_complete",
-            event_count=router.event_count,
         )
 
     except asyncio.CancelledError:

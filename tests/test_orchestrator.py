@@ -169,8 +169,81 @@ class TestRunLiveWithProcessing:
             assert result == 0
 
     @pytest.mark.asyncio
-    async def test_completes_with_max_events(self, tmp_path: Path) -> None:
-        """Completes when max_events is reached."""
+    async def test_does_not_exit_on_first_exhaustion(self, tmp_path: Path) -> None:
+        """Collector restart loop continues after first exhaustion."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from ravebear_monolith.foundation.orchestrator import run_live_with_processing
+
+        config = AppConfig(
+            data_dir=tmp_path,
+            storage={"db_path": tmp_path / "events.db"},
+        )
+
+        mock_collector = MagicMock()
+        mock_collector.is_running = True
+
+        # Track call count for events()
+        events_call_count = 0
+
+        async def exhausting_events(*args, max_events=None, **kwargs):
+            """First call yields nothing (exhausts), subsequent calls hang."""
+            nonlocal events_call_count
+            events_call_count += 1
+            if events_call_count == 1:
+                # First call: exhaust immediately (empty generator)
+                return
+            else:
+                # Second call: hang until cancelled
+                await asyncio.sleep(100)
+                yield MagicMock()
+
+        # Track router instantiation count
+        router_instantiation_count = 0
+
+        def mock_router_factory(*args, **kwargs):
+            nonlocal router_instantiation_count
+            router_instantiation_count += 1
+            mock_instance = MagicMock()
+            mock_instance.events = exhausting_events
+            mock_instance.event_count = 0
+            return mock_instance
+
+        with (
+            patch(
+                "ravebear_monolith.collectors.router.CollectorRouter",
+                side_effect=mock_router_factory,
+            ),
+            patch("ravebear_monolith.core.replay_runner.ReplayRunner") as MockRunner,
+            patch(
+                "ravebear_monolith.processors.okx.trades_to_bars_1s.TradesToBars1sProcessor"
+            ) as MockProcessor,
+        ):
+            mock_runner_instance = AsyncMock()
+            mock_runner_instance.run = AsyncMock(return_value=0)
+            MockRunner.return_value = mock_runner_instance
+            MockProcessor.return_value = MagicMock()
+
+            async def run_with_cancel():
+                task = asyncio.create_task(
+                    run_live_with_processing(config, [mock_collector], max_events=10)
+                )
+                # Wait long enough for first exhaustion + backoff + restart
+                await asyncio.sleep(0.8)
+                task.cancel()
+                try:
+                    return await task
+                except asyncio.CancelledError:
+                    return 0
+
+            result = await asyncio.wait_for(run_with_cancel(), timeout=5.0)
+            assert result == 0
+            # Should have instantiated router at least twice (first exhausted, second for restart)
+            assert router_instantiation_count >= 2
+
+    @pytest.mark.asyncio
+    async def test_processes_events_before_cancellation(self, tmp_path: Path) -> None:
+        """Events are processed and written before cancellation."""
         from unittest.mock import AsyncMock, MagicMock, patch
 
         from ravebear_monolith.collectors.base import CollectorEvent
@@ -183,9 +256,9 @@ class TestRunLiveWithProcessing:
 
         events_yielded = 0
 
-        async def limited_events(*args, max_events=None, **kwargs):
+        async def yielding_events(*args, max_events=None, **kwargs):
             nonlocal events_yielded
-            for i in range(max_events or 3):
+            for i in range(3):
                 events_yielded += 1
                 yield CollectorEvent(
                     source="test",
@@ -194,6 +267,8 @@ class TestRunLiveWithProcessing:
                     payload={"price": 100, "size": 1, "trade_ts_ms": 1704067200000},
                 )
                 await asyncio.sleep(0.01)
+            # Then hang until cancelled
+            await asyncio.sleep(100)
 
         mock_collector = MagicMock()
         mock_collector.is_running = True
@@ -206,7 +281,7 @@ class TestRunLiveWithProcessing:
             ) as MockProcessor,
         ):
             mock_router_instance = MagicMock()
-            mock_router_instance.events = limited_events
+            mock_router_instance.events = yielding_events
             mock_router_instance.event_count = 0
             MockRouter.return_value = mock_router_instance
 
@@ -217,10 +292,17 @@ class TestRunLiveWithProcessing:
 
             MockProcessor.return_value = MagicMock()
 
-            result = await asyncio.wait_for(
-                run_live_with_processing(config, [mock_collector], max_events=3),
-                timeout=5.0,
-            )
+            async def run_with_cancel():
+                task = asyncio.create_task(run_live_with_processing(config, [mock_collector]))
+                # Wait for events to be yielded
+                await asyncio.sleep(0.2)
+                task.cancel()
+                try:
+                    return await task
+                except asyncio.CancelledError:
+                    return 0
+
+            result = await asyncio.wait_for(run_with_cancel(), timeout=5.0)
             assert result == 0
             assert events_yielded == 3
 
