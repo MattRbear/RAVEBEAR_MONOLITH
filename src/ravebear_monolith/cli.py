@@ -2,6 +2,12 @@
 
 Provides signal handling for graceful shutdown on SIGINT/SIGTERM.
 Works on Windows (KeyboardInterrupt fallback) and Unix (signal handlers).
+
+Exit codes:
+- 0: Clean shutdown
+- 1: Error (config failure, fatal exception)
+- 2: Kill switch triggered
+- 130: Interrupted by SIGINT/Ctrl+C (128 + 2)
 """
 
 import argparse
@@ -11,6 +17,32 @@ import sys
 from pathlib import Path
 
 from ravebear_monolith.foundation import orchestrator
+
+# Exit code constants
+EXIT_OK = 0
+EXIT_ERROR = 1
+EXIT_KILL_SWITCH = 2
+EXIT_SIGINT = 130  # 128 + SIGINT(2)
+
+
+def _is_cancellation(exc: BaseException) -> bool:
+    """Check if exception represents cancellation/interrupt.
+
+    Handles:
+    - asyncio.CancelledError
+    - KeyboardInterrupt
+    - ExceptionGroup containing CancelledError (Python 3.11+)
+    """
+    if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt)):
+        return True
+
+    # Python 3.11+ can wrap CancelledError in ExceptionGroup
+    if isinstance(exc, BaseExceptionGroup):
+        for sub_exc in exc.exceptions:
+            if _is_cancellation(sub_exc):
+                return True
+
+    return False
 
 
 async def _run_orchestrator_async(argv: list[str] | None = None) -> int:
@@ -27,9 +59,6 @@ async def _run_orchestrator_async(argv: list[str] | None = None) -> int:
     """
     loop = asyncio.get_running_loop()
 
-    # Create the main task
-    # Note: orchestrator.main() is sync and calls asyncio.run() internally,
-    # so we need to run the async functions directly
     from ravebear_monolith.foundation.config import load_config
 
     # Parse arguments to get config and mode
@@ -63,7 +92,7 @@ async def _run_orchestrator_async(argv: list[str] | None = None) -> int:
         config = load_config(args.config)
     except Exception as e:
         print(f"FATAL: Failed to load configuration: {e}", file=sys.stderr)
-        return 1
+        return EXIT_ERROR
 
     # Create the appropriate coroutine based on mode
     if args.mode == "replay":
@@ -92,9 +121,13 @@ async def _run_orchestrator_async(argv: list[str] | None = None) -> int:
 
     main_task = asyncio.create_task(coro)
 
-    # Install signal handlers (Unix only - Windows uses KeyboardInterrupt)
+    # Track if we received an interrupt
+    interrupted = False
+
     def signal_handler() -> None:
         """Cancel main task on signal."""
+        nonlocal interrupted
+        interrupted = True
         if not main_task.done():
             main_task.cancel()
 
@@ -108,23 +141,41 @@ async def _run_orchestrator_async(argv: list[str] | None = None) -> int:
             pass
 
     try:
-        return await main_task
-    except asyncio.CancelledError:
-        return 130  # Standard exit code for SIGINT
+        result = await main_task
+        # If we got interrupted but task returned cleanly, still return 130
+        return EXIT_SIGINT if interrupted else result
+    except BaseException as e:
+        if _is_cancellation(e):
+            return EXIT_SIGINT
+        raise
 
 
 def cli_main(argv: list[str] | None = None) -> int:
     """Main CLI entry point with graceful shutdown.
 
-    Handles KeyboardInterrupt and CancelledError as fallback for Windows.
+    Handles all forms of cancellation/interrupt on all platforms.
     """
     try:
         return asyncio.run(_run_orchestrator_async(argv))
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        # Windows fallback - KeyboardInterrupt/CancelledError instead of signal
-        return 130
+    except BaseException as e:
+        # Catch everything that might represent cancellation
+        if _is_cancellation(e):
+            return EXIT_SIGINT
+        # Re-raise actual errors
+        raise
 
 
 def main() -> None:
-    """Entry point for poetry scripts."""
-    sys.exit(cli_main())
+    """Entry point for poetry scripts.
+
+    Uses sys.exit() directly to ensure correct exit code.
+    """
+    try:
+        code = cli_main()
+        sys.exit(code)
+    except BaseException as e:
+        if _is_cancellation(e):
+            # Force exit code 130 on any cancellation that escapes
+            sys.exit(EXIT_SIGINT)
+        # Let other exceptions propagate (will exit with code 1)
+        raise

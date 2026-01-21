@@ -16,7 +16,9 @@ from pydantic import ValidationError
 
 from ravebear_monolith.foundation.config import AppConfig
 from ravebear_monolith.storage.bar_reader import BarQuerySpec, BarReader
+from ravebear_monolith.storage.bar_sink import BarSink
 from ravebear_monolith.storage.event_reader import EventReader, QuerySpec
+from ravebear_monolith.storage.event_sink import EventSink
 from ravebear_monolith.util.health import collect_health_snapshot
 from ravebear_monolith.util.logging import log_event
 
@@ -29,6 +31,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Manage reader connections on startup/shutdown."""
     config: AppConfig = app.state.config
     db_path = config.storage.db_path
+
+    # Ensure schema exists (sinks create tables, readers are read-only)
+    async with EventSink(db_path):
+        pass
+    async with BarSink(db_path):
+        pass
 
     # Create readers (query_only mode is default in readers)
     event_reader = EventReader(db_path)

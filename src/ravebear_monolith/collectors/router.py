@@ -33,6 +33,7 @@ class CollectorRouter:
         budget_registry: Rate limit budget registry.
         kill_switch_path: Path to kill switch file.
         retry_policy: Policy for retrying failed next_event calls.
+        live_mode: If True, don't exit when collectors return None (they may be idle).
     """
 
     def __init__(
@@ -41,11 +42,13 @@ class CollectorRouter:
         budget_registry: BudgetRegistry,
         kill_switch_path: Path,
         retry_policy: RetryPolicy | None = None,
+        live_mode: bool = False,
     ) -> None:
         self._collectors = collectors
         self._budget = budget_registry
         self._kill_switch = KillSwitch(kill_switch_path)
         self._retry_policy = retry_policy or RetryPolicy()
+        self._live_mode = live_mode
         self._running = False
         self._event_count = 0
 
@@ -205,15 +208,17 @@ class CollectorRouter:
                     else:
                         exhausted_count += 1
 
-                # If all collectors returned None, they're exhausted - stop
-                if exhausted_count == len(self._collectors) and len(self._collectors) > 0:
-                    log_event(
-                        logger,
-                        logging.INFO,
-                        "All collectors exhausted",
-                        event="router_exhausted",
-                    )
-                    break
+                # In live mode, don't exit on "all None" - collectors are just idle
+                # In batch mode (max_events set or not live_mode), exit when exhausted
+                if not self._live_mode:
+                    if exhausted_count == len(self._collectors) and len(self._collectors) > 0:
+                        log_event(
+                            logger,
+                            logging.INFO,
+                            "All collectors exhausted",
+                            event="router_exhausted",
+                        )
+                        break
 
                 # If no events from any collector, yield control briefly
                 if events_this_round == 0:
@@ -260,6 +265,7 @@ class CollectorRouter:
             f"Router starting with {len(self._collectors)} collectors",
             event="router_start",
             collector_count=len(self._collectors),
+            live_mode=self._live_mode,
         )
 
         try:
@@ -289,6 +295,7 @@ class CollectorRouter:
                     return
 
                 # Collect from all collectors (round-robin)
+                events_this_round = 0
                 exhausted_count = 0
                 for collector in self._collectors:
                     # Rate limit check
@@ -298,6 +305,7 @@ class CollectorRouter:
                     event = await self._get_event_with_retry(collector)
                     if event:
                         self._event_count += 1
+                        events_this_round += 1
                         log_event(
                             logger,
                             logging.DEBUG,
@@ -315,18 +323,20 @@ class CollectorRouter:
                     else:
                         exhausted_count += 1
 
-                # If all collectors returned None, they're exhausted - stop
-                if exhausted_count == len(self._collectors) and len(self._collectors) > 0:
-                    log_event(
-                        logger,
-                        logging.INFO,
-                        "All collectors exhausted",
-                        event="router_exhausted",
-                    )
-                    return
+                # In live mode, don't exit on "all None" - collectors are just idle
+                # In batch mode (not live_mode), exit when all collectors return None
+                if not self._live_mode:
+                    if exhausted_count == len(self._collectors) and len(self._collectors) > 0:
+                        log_event(
+                            logger,
+                            logging.INFO,
+                            "All collectors exhausted",
+                            event="router_exhausted",
+                        )
+                        return
 
                 # If no events from any collector, yield control briefly
-                if exhausted_count == len(self._collectors):
+                if events_this_round == 0:
                     await asyncio.sleep(0.01)
 
         except asyncio.CancelledError:
