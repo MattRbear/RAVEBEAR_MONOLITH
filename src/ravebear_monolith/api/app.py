@@ -79,6 +79,17 @@ def create_app(config: AppConfig) -> FastAPI:
     # Store config in app state for lifespan access
     app.state.config = config
 
+    # Enable CORS for dashboard connections
+    from fastapi.middleware.cors import CORSMiddleware
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],  # Allow all origins for local development
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     # Register middleware
     @app.middleware("http")
     async def correlation_id_middleware(request: Request, call_next) -> Response:
