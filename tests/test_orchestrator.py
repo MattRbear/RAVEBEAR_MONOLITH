@@ -169,8 +169,8 @@ class TestRunLiveWithProcessing:
             assert result == 0
 
     @pytest.mark.asyncio
-    async def test_does_not_exit_on_first_exhaustion(self, tmp_path: Path) -> None:
-        """Collector restart loop continues after first exhaustion."""
+    async def test_live_mode_keeps_polling_on_no_events(self, tmp_path: Path) -> None:
+        """Router with live_mode=True keeps polling even when no events."""
         from unittest.mock import AsyncMock, MagicMock, patch
 
         from ravebear_monolith.foundation.orchestrator import run_live_with_processing
@@ -183,42 +183,35 @@ class TestRunLiveWithProcessing:
         mock_collector = MagicMock()
         mock_collector.is_running = True
 
-        # Track call count for events()
-        events_call_count = 0
+        # Track how many times events() yields control (polls)
+        poll_count = 0
 
-        async def exhausting_events(*args, max_events=None, **kwargs):
-            """First call yields nothing (exhausts), subsequent calls hang."""
-            nonlocal events_call_count
-            events_call_count += 1
-            if events_call_count == 1:
-                # First call: exhaust immediately (empty generator)
-                return
-            else:
-                # Second call: hang until cancelled
-                await asyncio.sleep(100)
-                yield MagicMock()
-
-        # Track router instantiation count
-        router_instantiation_count = 0
-
-        def mock_router_factory(*args, **kwargs):
-            nonlocal router_instantiation_count
-            router_instantiation_count += 1
-            mock_instance = MagicMock()
-            mock_instance.events = exhausting_events
-            mock_instance.event_count = 0
-            return mock_instance
+        async def polling_events(*args, max_events=None, **kwargs):
+            """Async generator that never yields events but keeps polling."""
+            nonlocal poll_count
+            while True:
+                poll_count += 1
+                await asyncio.sleep(0.05)  # Simulate polling interval
+                if poll_count >= 5:
+                    # After 5 polls, hang until cancelled
+                    await asyncio.sleep(100)
+                    return  # Exit generator after long sleep
+                # Must have yield to be an async generator (even if we yield nothing)
+                # This yield is unreachable but makes the function an async generator
+            yield  # Makes this an async generator
 
         with (
-            patch(
-                "ravebear_monolith.collectors.router.CollectorRouter",
-                side_effect=mock_router_factory,
-            ),
+            patch("ravebear_monolith.collectors.router.CollectorRouter") as MockRouter,
             patch("ravebear_monolith.core.replay_runner.ReplayRunner") as MockRunner,
             patch(
                 "ravebear_monolith.processors.okx.trades_to_bars_1s.TradesToBars1sProcessor"
             ) as MockProcessor,
         ):
+            mock_router_instance = MagicMock()
+            mock_router_instance.events = polling_events
+            mock_router_instance.event_count = 0
+            MockRouter.return_value = mock_router_instance
+
             mock_runner_instance = AsyncMock()
             mock_runner_instance.run = AsyncMock(return_value=0)
             MockRunner.return_value = mock_runner_instance
@@ -228,8 +221,8 @@ class TestRunLiveWithProcessing:
                 task = asyncio.create_task(
                     run_live_with_processing(config, [mock_collector], max_events=10)
                 )
-                # Wait long enough for first exhaustion + backoff + restart
-                await asyncio.sleep(0.8)
+                # Wait for several poll cycles
+                await asyncio.sleep(0.4)
                 task.cancel()
                 try:
                     return await task
@@ -238,8 +231,13 @@ class TestRunLiveWithProcessing:
 
             result = await asyncio.wait_for(run_with_cancel(), timeout=5.0)
             assert result == 0
-            # Should have instantiated router at least twice (first exhausted, second for restart)
-            assert router_instantiation_count >= 2
+            # Should have polled multiple times (live_mode keeps it alive)
+            assert poll_count >= 3
+            # Router should only be instantiated once (no restart needed)
+            assert MockRouter.call_count == 1
+            # Verify live_mode=True was passed
+            call_kwargs = MockRouter.call_args.kwargs
+            assert call_kwargs.get("live_mode") is True
 
     @pytest.mark.asyncio
     async def test_processes_events_before_cancellation(self, tmp_path: Path) -> None:
