@@ -1,26 +1,269 @@
-﻿MASTER AUDIT SUMMARY
-====================
-Date: 2026-01-06
-Auditor: System Auditor Agent
+(1) ENTRYPOINTS & RUNTIME LOOPS
+- Subsystem file map (priority scan order):
+  - Ingest: `/home/runner/work/RAVEBEAR_MONOLITH/RAVEBEAR_MONOLITH/src/ravebear_monolith/collectors/okx/live.py`, `/home/runner/work/RAVEBEAR_MONOLITH/RAVEBEAR_MONOLITH/src/ravebear_monolith/collectors/okx/dry_run.py`, `/home/runner/work/RAVEBEAR_MONOLITH/RAVEBEAR_MONOLITH/src/ravebear_monolith/collectors/router.py`
+  - Candle build: `/home/runner/work/RAVEBEAR_MONOLITH/RAVEBEAR_MONOLITH/src/ravebear_monolith/processors/okx/trades_to_bars_1s.py`
+  - Persistence: `/home/runner/work/RAVEBEAR_MONOLITH/RAVEBEAR_MONOLITH/src/ravebear_monolith/storage/event_sink.py`, `/home/runner/work/RAVEBEAR_MONOLITH/RAVEBEAR_MONOLITH/src/ravebear_monolith/storage/bar_sink.py`, `/home/runner/work/RAVEBEAR_MONOLITH/RAVEBEAR_MONOLITH/src/ravebear_monolith/storage/cursor_store.py`, `/home/runner/work/RAVEBEAR_MONOLITH/RAVEBEAR_MONOLITH/src/ravebear_monolith/storage/replayer.py`
+  - Runtime/service: `/home/runner/work/RAVEBEAR_MONOLITH/RAVEBEAR_MONOLITH/src/ravebear_monolith/cli.py`, `/home/runner/work/RAVEBEAR_MONOLITH/RAVEBEAR_MONOLITH/src/ravebear_monolith/foundation/orchestrator.py`, `/home/runner/work/RAVEBEAR_MONOLITH/RAVEBEAR_MONOLITH/src/ravebear_monolith/api/cli.py`, `/home/runner/work/RAVEBEAR_MONOLITH/RAVEBEAR_MONOLITH/src/ravebear_monolith/api/app.py`
+  - EVIDENCE: file-level scan and deep read of the above modules.
+- Entrypoint: `monolith` script → `/home/runner/work/RAVEBEAR_MONOLITH/RAVEBEAR_MONOLITH/src/ravebear_monolith/cli.py:main()`.
+  - Start: `main()` calls `cli_main()` then `asyncio.run(_run_orchestrator_async())` (lines 153-181, 48-122).
+  - Stop: SIGINT/SIGTERM handlers cancel `main_task` (lines 127-141); cancellation maps to exit 130 (lines 147-150, 160-164, 173-181).
+  - Primary loop(s): delegated to `orchestrator.run(...)`, `ReplayRunner.run()`, or `orchestrator.run_live_with_processing(...)` by `--mode` (lines 97-120).
+  - EVIDENCE: `/src/ravebear_monolith/cli.py`.
+- Entrypoint: orchestrator module direct run → `/home/runner/work/RAVEBEAR_MONOLITH/RAVEBEAR_MONOLITH/src/ravebear_monolith/foundation/orchestrator.py:main(argv)`.
+  - Start: parse args and `asyncio.run(...)` into selected mode (lines 445-512).
+  - Stop: task completion, cancellation, or fatal path return code; kill switch path can force return 2 in loops.
+  - Primary loop(s):
+    - `run()` heartbeat loop `while True` + `asyncio.sleep(config.heartbeat_interval_s)` (lines 79-104).
+    - `run_with_collectors()` async stream loop over `router.events(...)` (line 181).
+    - `run_live_with_processing()` parallel `collector_loop()` + `processing_loop()` tasks (lines 292-442).
+  - EVIDENCE: `/src/ravebear_monolith/foundation/orchestrator.py`.
+- Entrypoint: runtime helper → `/home/runner/work/RAVEBEAR_MONOLITH/RAVEBEAR_MONOLITH/src/ravebear_monolith/runtime/main.py:run()`.
+  - Start: `asyncio.run(_run_lifecycle(...))` (line 42).
+  - Stop: exceptions return code 1 (lines 41-45) or natural completion after `max_beats` via orchestrator.
+  - Loop: none local; delegates heartbeat loop to `orchestrator_run`.
+  - EVIDENCE: `/src/ravebear_monolith/runtime/main.py`.
+- Entrypoint: API service runner → `/home/runner/work/RAVEBEAR_MONOLITH/RAVEBEAR_MONOLITH/src/ravebear_monolith/api/cli.py:main()`.
+  - Start: load config, build app, `uvicorn.run(app, ...)` (lines 21-29).
+  - Stop: uvicorn lifecycle; app `lifespan()` closes readers on shutdown (api/app.py lines 57-60).
+  - Primary loop(s): ASGI request loop in uvicorn; per-request middleware loop in `correlation_id_middleware`.
+  - EVIDENCE: `/src/ravebear_monolith/api/cli.py`, `/src/ravebear_monolith/api/app.py`.
+- Async/background loops, reconnect loops, and tasks:
+  - WebSocket reconnect loop: `OKXTradesLiveCollector._receive_loop()` outer `while not _should_stop` with exponential backoff (live.py lines 164-247).
+  - Message receive loop: inner `while not _should_stop and self._ws` reading `await self._ws.recv()` (lines 176-199).
+  - Router event polling loop: `CollectorRouter.events()` and `CollectorRouter.run()` loops with idle sleep 10ms (router.py lines 160-340).
+  - Replay loop: `ReplayRunner.run()` iterates `async for event in replayer.iter_events()` (replay_runner.py line 119).
+  - Parallel tasks: `run_live_with_processing()` uses `asyncio.create_task` for collector + processing loops and waits for first completion (orchestrator.py lines 393-400).
+  - EVIDENCE: `/src/ravebear_monolith/collectors/okx/live.py`, `/src/ravebear_monolith/collectors/router.py`, `/src/ravebear_monolith/foundation/orchestrator.py`, `/src/ravebear_monolith/core/replay_runner.py`.
+- Threads/processes/schedulers/timers:
+  - No explicit threads/process pools found in audited runtime path.
+  - Timers: `asyncio.sleep(...)` in heartbeat, router idle, replay polling, and reconnect backoff.
+  - Cron-like scheduler: UNKNOWN (no scheduler framework found).
+  - EVIDENCE: searched runtime/collector/orchestrator modules for thread/process/scheduler constructs.
+- Global singletons/shared state:
+  - Module-level loggers (`logger = logging.getLogger(__name__)`) across modules (shared logging sink).
+  - Shared SQLite file across components (`config.storage.db_path` used by EventSink/BarSink/EventReader/CursorStore).
+  - In-memory mutable state:
+    - `CollectorRouter._event_count`, `_running`.
+    - `OKXTradesLiveCollector._event_queue`, `_ws`, `_receiver_task`.
+    - `TradesToBars1sProcessor._buckets` and `_bar_sink`.
+  - EVIDENCE: constructor fields in the listed classes.
 
-SYSTEMS AUDITED:
-1. RaveQuant (Critical Infrastructure) - *BROKEN PATHS*
-2. Microstructure Engine (Logic Core)
-3. Backtester (Simulation Lab)
-4. Microstructure Collector (Monitoring)
-5. ALPHA (Wick Scanner)
+(2) DATAFLOW DIAGRAM (TEXT)
+- SOURCE → INGEST
+  - OKX WS trades JSON frame (`live.py:_process_message`) or fixture JSON (`dry_run.py:next_event`).
+  - Schema: raw dict with `instId/tradeId/px/sz/side/ts`.
+  - Timestamp used: exchange trade timestamp `ts` normalized by `OKXTrade._normalize_timestamp` to `ts_utc` (event time).
+  - Idempotency/dedupe: none at this stage.
+  - Ordering guarantee: WS arrival order only; no monotonic enforcement.
+  - EVIDENCE: `/src/ravebear_monolith/collectors/okx/live.py` lines 262-273; `/src/ravebear_monolith/collectors/okx/schemas.py` lines 40-94.
+- INGEST → NORMALIZE
+  - `OKXTrade.from_raw` coerces price/size to float and normalizes timestamp string.
+  - `CollectorEvent` schema: `{source,event_type,ts_utc,payload}`.
+  - Timestamp semantics: `ts_utc` is intended event time; malformed/empty values can fall back to timezone-naive local current time.
+  - Idempotency key: none in-memory.
+  - Ordering guarantee: none.
+  - EVIDENCE: `/src/ravebear_monolith/collectors/okx/schemas.py`; `/src/ravebear_monolith/collectors/base.py`.
+- NORMALIZE → ENRICH
+  - Enrichment is limited to wrapping validated payload into `CollectorEvent`.
+  - Timestamp semantics unchanged (`trade.ts_utc` copied).
+  - Dedupe/order unchanged.
+  - EVIDENCE: live.py lines 266-272; dry_run.py lines 70-77.
+- ENRICH → AGGREGATE (1s)
+  - Path A (storage): `CollectorRouter.events()` emits `CollectorEvent` to `EventSink.write()`.
+  - Path B (bar build): replay path reads stored events and `TradesToBars1sProcessor.process()` builds 1s buckets.
+  - Timestamp used for bucket: `bucket_ts_ms = (event.ts_ms // 1000) * 1000` (receive/store timestamp), while OHLC ordering uses `trade_ts_ms` if present for trade sort key.
+  - Idempotency key: replay cursor `(last_ts_ms,last_event_id)` for resume; no per-trade dedupe in processor.
+  - Ordering guarantee: reader sorts by `(ts,id)`; deterministic tie-break via `event.id` and trade sort key.
+  - EVIDENCE: `/src/ravebear_monolith/storage/event_reader.py` lines 182-188; `/src/ravebear_monolith/processors/okx/trades_to_bars_1s.py` lines 147-191; `/src/ravebear_monolith/storage/replayer.py` lines 68-99.
+- AGGREGATE → STORE
+  - Events table (`events`): `id, ts, source, type, payload_json, content_hash`.
+  - Bars table (`bars_1s`): `symbol, ts_ms, open, high, low, close, volume, trade_count`.
+  - Timestamps semantics:
+    - `events.ts`: parsed from `CollectorEvent.ts_utc` in ms.
+    - `bars_1s.ts_ms`: bucket start ms.
+  - Idempotency/dedupe:
+    - Events: `id=sha256(source:ts:content_hash)` + `INSERT OR IGNORE`.
+    - Bars: upsert merge on `(symbol,ts_ms)` sums volume/trade_count.
+  - Ordering guarantee: persisted retrieval ordered by `ts,id` or `ts_ms,symbol` in readers.
+  - EVIDENCE: `/src/ravebear_monolith/storage/event_sink.py`; `/src/ravebear_monolith/storage/bar_sink.py`; `/src/ravebear_monolith/storage/bar_reader.py`.
+- STORE → READERS
+  - Read APIs: `EventReader.query/iter_query`, `BarReader.query/iter_query` with query-only sqlite pragma.
+  - Timestamp semantics retained as integer ms fields.
+  - Dedupe: none at reader stage.
+  - Ordering guarantee: explicit ORDER BY in SQL.
+  - EVIDENCE: `/src/ravebear_monolith/storage/event_reader.py`; `/src/ravebear_monolith/storage/bar_reader.py`.
+- READERS → SIGNALS
+  - Signal engine integration inside `src/` path is UNKNOWN (no runtime signal processor consuming `bars_1s` found in audited modules).
+  - Missing evidence: concrete class/function in `src/ravebear_monolith/*` that turns bars/events into signals.
+- SIGNALS → OUTPUTS
+  - Current implemented outputs in audited runtime: SQLite tables and read-only API endpoints `/events`, `/bars/1s`, `/health`.
+  - Signal outputs: UNKNOWN (no signal output path found in `src/`).
+  - EVIDENCE: `/src/ravebear_monolith/api/app.py` routes.
 
-TOP ISSUES (HIGHEST PRIORITY):
-1. [P0] RaveQuant Path Error: The core system is hardcoded to look for 'RaveQuant', but the folder is named 'RaveQuant - cvd...'. This breaks everything.
-2. [P1] Missing Integration: The 'Institutional Gates' (Microstructure Engine) are excellent but not connected to the 'Confluence Analyzer' (RaveQuant).
-3. [P1] Data Simulation Gap: The Backtester cannot read RaveQuant's data files yet.
+(3) TOP 10 FAILURE MODES (RANKED)
+- 1) Late/out-of-order trades assigned to wrong candle bucket. Score: Likelihood 4 × Blast Radius 5.
+  - Symptom: OHLC values may be deterministic but bars land in wrong second.
+  - Root cause chain: processor floors `event.ts_ms` (storage timestamp) for bucket, not `trade_ts_ms`; delayed delivery shifts trade into later bucket.
+  - Code anchors: `/src/ravebear_monolith/processors/okx/trades_to_bars_1s.py:147-161`.
+  - Detection: invariant check `bucket_ts_ms == trade_ts_ms_floor` should hold for near-real-time stream.
+  - Mitigation: bucket by `trade_ts_ms` when present; only fallback to `event.ts_ms`.
+  - EVIDENCE: bucket computation line 160.
+- 2) Replay with different cursor double-counts bars. Score: 4 × 5.
+  - Symptom: volume/trade_count inflate after backfill/live merge or accidental re-run.
+  - Root cause chain: replay reprocesses same events, `BarSink.upsert_bar()` adds volume/trade_count on conflict (not replace).
+  - Anchors: `/src/ravebear_monolith/storage/bar_sink.py:127-133`; confirmed by test `/tests/test_trades_to_bars_1s_processor.py:170-179`.
+  - Detection: checksum of per-second trade_count from events vs bars drifts upward after rerun.
+  - Mitigation: include deterministic per-bar aggregate replacement in replay mode (replace not additive) or enforce single cursor.
+  - EVIDENCE: explicit ON CONFLICT summation.
+- 3) Timestamp parse fallback silently uses local wall-clock time. Score: 3 × 5.
+  - Symptom: events inserted at current host time, causing replay ordering corruption and apparent data jumps.
+  - Root cause chain: `EventSink._parse_timestamp` catches `ValueError` and returns `datetime.now().timestamp()` from a timezone-naive local datetime.
+  - Anchors: `/src/ravebear_monolith/storage/event_sink.py:192-203`.
+  - Detection: log/metric count of parse failures; invariant `abs(parsed_ts - payload.trade_ts_ms)` threshold alarm.
+  - Mitigation: fail closed on parse error or use timezone-aware UTC fallback with explicit error metric.
+  - EVIDENCE: fallback branch line 203.
+- 4) Seconds-vs-milliseconds mistake accepted as valid timestamp. Score: 3 × 5.
+  - Symptom: timestamps near 1970 or far-future bars/events.
+  - Root cause chain: `_normalize_timestamp` treats any digit string/int as milliseconds; seconds input (10 digits) is divided by 1000 again.
+  - Anchors: `/src/ravebear_monolith/collectors/okx/schemas.py:81-85`.
+  - Detection: reject timestamps outside expected trading epoch window.
+  - Mitigation: branch by magnitude (`>=1e12` ms else seconds).
+  - EVIDENCE: ms-only conversion logic.
+- 5) Naive datetime interpreted in local timezone. Score: 3 × 4.
+  - Symptom: DST/local timezone shift offsets event times.
+  - Root cause chain: `datetime.fromisoformat()` on naive string yields naive datetime; `.timestamp()` interprets local timezone.
+  - Anchors: `/src/ravebear_monolith/storage/event_sink.py:197-201` and `/src/ravebear_monolith/collectors/okx/schemas.py:88-90`.
+  - Detection: invariant requiring explicit offset in every `ts_utc` string before persistence.
+  - Mitigation: reject naive strings or force `timezone.utc` attachment.
+  - EVIDENCE: no explicit tz enforcement before `.timestamp()` in EventSink.
+- 6) Silent drop of malformed WS messages. Score: 4 × 4.
+  - Symptom: pipeline stays healthy but missing trades.
+  - Root cause chain: `_process_message` catches broad exceptions and logs warning; message discarded without counter/kill switch.
+  - Anchors: `/src/ravebear_monolith/collectors/okx/live.py:275-290`.
+  - Detection: metric for `okx_process_error` rate and expected-vs-observed trade throughput.
+  - Mitigation: increment explicit drop counter and trip kill switch on sustained drop rate.
+  - EVIDENCE: broad except only logs warning.
+- 7) Event dedupe key can miss true duplicates across timestamp jitter. Score: 3 × 4.
+  - Symptom: same exchange trade appears twice in events table if ts differs slightly.
+  - Root cause chain: event id hashes `source:ts:content_hash`; duplicate payload with changed ts yields new ID.
+  - Anchors: `/src/ravebear_monolith/storage/event_sink.py:183-189`.
+  - Detection: compare unique `trade_id` count in payload vs event row count.
+  - Mitigation: include stable venue key (`trade_id`, `inst_id`) in idempotency strategy when available.
+  - EVIDENCE: id construction does not use trade_id.
+- 8) Reconnect loop can hide persistent upstream outage indefinitely. Score: 4 × 3.
+  - Symptom: process remains running with no incoming events.
+  - Root cause chain: `_receive_loop` retries forever with backoff and no max outage guard.
+  - Anchors: `/src/ravebear_monolith/collectors/okx/live.py:167-247`.
+  - Detection: heartbeat metric for seconds since last event and reconnect attempt counter.
+  - Mitigation: fail closed after outage threshold by triggering kill switch.
+  - EVIDENCE: while-loop has no stop condition except external stop/cancel.
+- 9) Clock drift/NTP mismatch affects cursor/updated timestamps and fallback times. Score: 2 × 3.
+  - Symptom: non-monotonic `updated_ts_ms`, confusing restart diagnostics.
+  - Root cause chain: uses host clock via `datetime.now(timezone.utc)` in cursor updates and local now in parse fallback.
+  - Anchors: `/src/ravebear_monolith/storage/cursor_store.py:127`; `/src/ravebear_monolith/storage/event_sink.py:203`.
+  - Detection: monotonicity check on cursor `updated_ts_ms`.
+  - Mitigation: source from monotonic/UTC synchronized clock and reject backward jumps.
+  - EVIDENCE: direct now() usage.
+- 10) Time-domain coverage gaps not modeled (funding/leap seconds/multi-venue calendars). Score: 2 × 3.
+  - Symptom: unsupported timestamp alignment requirements silently unhandled.
+  - Root cause chain: only OKX trades feed and 1s bars implemented; no funding timestamp model or multi-venue calendar layer.
+  - Anchors: `/src/ravebear_monolith/collectors/okx/*`, `/src/ravebear_monolith/processors/okx/trades_to_bars_1s.py`.
+  - Detection: explicit capability checks in startup health.
+  - Mitigation: add fail-fast config flags when unsupported data domains are requested.
+  - EVIDENCE: no funding/calendar schema classes in `src/ravebear_monolith`.
 
-RECOMMENDED ACTION PLAN (High ROI):
-1. RENAME folder 'RaveQuant - cvd,vwap,liqyudity buckets done' -> 'RaveQuant'.
-2. RUN 'run_all.bat' in RaveQuant to verify collectors start.
-3. COPY 'institutional_gates.py' from Microstructure Engine into RaveQuant/Analysis.
-4. UPDATE RaveQuant/Analysis/confluence_analyzer.py to use the gates as a final filter.
-5. MODIFY Backtester/data_loader.py to ingest RaveQuant's JSONL files.
+(4) TOP 5 SILENT FAILURE PATHS (NO-ALARM FAILURES)
+- 1) Malformed timestamps silently replaced by current time.
+  - Loss point: `EventSink._parse_timestamp` fallback branch.
+  - Why silent: exception swallowed; write still succeeds.
+  - Force scream: assert parse success and reject/alert on fallback counter > 0.
+  - EVIDENCE: `/src/ravebear_monolith/storage/event_sink.py:201-203`.
+- 2) Collector message processing errors only log warning.
+  - Loss point: `OKXTradesLiveCollector._process_message` broad `except Exception`.
+  - Why silent: no escalation, no backpressure, no kill switch.
+  - Force scream: hard threshold alarm on `okx_process_error`; optional fail-closed after N consecutive drops.
+  - EVIDENCE: `/src/ravebear_monolith/collectors/okx/live.py:283-290`.
+- 3) Dry-run collector missing fixture returns empty stream as normal.
+  - Loss point: `start()` sets `_trades=[]` if file missing.
+  - Why silent: no exception; router exits as exhausted.
+  - Force scream: raise `FileNotFoundError` when fixture path absent in dry-run mode.
+  - EVIDENCE: `/src/ravebear_monolith/collectors/okx/dry_run.py:35-47`.
+- 4) Endless reconnect with no events appears alive.
+  - Loss point: live collector reconnect loop.
+  - Why silent: process stays running and logging warnings, but no explicit liveness failure.
+  - Force scream: health check on `last_event_age_ms` with hard timeout.
+  - EVIDENCE: `/src/ravebear_monolith/collectors/okx/live.py:217-247`.
+- 5) Duplicate replays inflate bars without error.
+  - Corruption point: `BarSink.upsert_bar` additive merge semantics.
+  - Why silent: valid SQL upsert; no invariant check against underlying event count.
+  - Force scream: post-replay assertion that bar trade_count equals deterministic source aggregation for cursor window.
+  - EVIDENCE: `/src/ravebear_monolith/storage/bar_sink.py:127-133`; test confirms doubling behavior.
 
-CONCLUSION:
-You possess a Hedge Fund grade architecture (Data Vault + Institutional Logic + Simulation). It is currently fragmented and brittle. Fixing the folder name and merging the logic will result in a powerful, unified trading system.
+(5) 3 HIGHEST ROI PERFORMANCE FIXES (ONLY IF CORRECTNESS SAFE)
+- 1) Hotspot: `/src/ravebear_monolith/storage/event_sink.py:141` (`commit` per event).
+  - Slow cause: per-row fsync/transaction overhead.
+  - Safe optimization: batch commits (e.g., commit every N writes or explicit transaction in orchestrator loop) while preserving order and idempotent SQL.
+  - Expected impact: substantial ingest throughput gain under high trade rates.
+  - EVIDENCE: current code commits inside every `write()`.
+- 2) Hotspot: `/src/ravebear_monolith/storage/bar_sink.py:145` (`commit` per bar upsert).
+  - Slow cause: frequent disk sync during replay flushes.
+  - Safe optimization: wrap replay finalize flush in transaction scope.
+  - Expected impact: faster replay/backfill wall-clock time.
+  - EVIDENCE: commit called for each upsert.
+- 3) Hotspot: `/src/ravebear_monolith/foundation/orchestrator.py:343-380` (recreate processor/runner each poll cycle).
+  - Slow cause: repeated object and connection setup when caught up.
+  - Safe optimization: keep persistent processor/replay runner loop with reopen only on failure.
+  - Expected impact: lower CPU/IO churn during steady-state live processing.
+  - EVIDENCE: processor/runner instantiated on each processing-loop iteration.
+
+(6) MINIMAL SMOKE TEST PLAN (END-TO-END)
+- 5 smoke tests (recorded/synthetic streams):
+  - 1) Live fixture ingest to events table.
+    - Component: `OKXTradesDryRunCollector` + `CollectorRouter` + `EventSink`.
+    - Pass: exact expected row count, unique IDs count equals rows.
+    - Artifacts: first/last 20 rows (`id,ts,source,type`), SHA256 over sorted IDs, logs.
+    - EVIDENCE: aligns with `/tests/test_orchestrator_storage_integration.py`.
+  - 2) Replay to 1s bars from deterministic synthetic trades.
+    - Component: `ReplayRunner` + `TradesToBars1sProcessor` + `BarSink`.
+    - Pass: one bar per second; OHLCV invariants hold.
+    - Artifacts: bars dump, per-second checksum, replay logs.
+    - EVIDENCE: `/tests/test_trades_to_bars_1s_processor.py`.
+  - 3) Restart safety with cursor resume.
+    - Component: `EventReplayer` + `CursorStore`.
+    - Pass: second run with same cursor processes zero additional events.
+    - Artifacts: cursor row before/after, processed_count, event IDs processed.
+    - EVIDENCE: `/src/ravebear_monolith/storage/replayer.py` cursor boundary logic.
+  - 4) API readback consistency.
+    - Component: `/events` and `/bars/1s` endpoints.
+    - Pass: API counts match direct DB counts for same filters.
+    - Artifacts: API JSON response samples, SQL count snapshots, request logs with correlation IDs.
+    - EVIDENCE: `/src/ravebear_monolith/api/app.py`.
+  - 5) Dedupe replay safety check with duplicate source events.
+    - Component: `EventSink.write` idempotency.
+    - Pass: identical event payload+ts inserted once (`INSERT OR IGNORE` behavior).
+    - Artifacts: attempted inserts, final row count, duplicate ID list.
+    - EVIDENCE: `/src/ravebear_monolith/storage/event_sink.py`.
+- 5 invariants / property tests:
+  - 1) Candle invariant: `low <= open <= high`, `low <= close <= high`, and `low <= high` for every bar.
+  - 2) Candle invariant: `volume >= 0`, `trade_count >= 0`, and `trade_count == 0 => volume == 0` (if zero-trade bars are ever emitted).
+  - 3) Timestamp invariant: all persisted event `ts` are integer ms and within configured epoch window.
+  - 4) Timestamp invariant: `bars_1s.ts_ms % 1000 == 0` and monotonic non-decreasing per symbol.
+  - 5) Replay invariant: for same cursor, rerun does not change bars/event counts.
+  - Pass: invariants hold over full sampled dataset; any violation fails test.
+  - Artifacts: violating rows, invariant failure counters, query snapshots.
+  - EVIDENCE: invariants target `bars_1s`/`events` schemas in storage modules.
+- 3 chaos tests:
+  - 1) WebSocket disconnect storm.
+    - Component: `OKXTradesLiveCollector._receive_loop`.
+    - Pass: reconnect attempts logged with bounded backoff; recovers and resumes events without crash.
+    - Artifacts: reconnect logs, time-to-recovery, event-gap window.
+  - 2) Out-of-order message injection.
+    - Component: replay + candle builder.
+    - Pass: deterministic OHLC from `trade_ts_ms` sort; bucket assignment invariant validated.
+    - Artifacts: injected sequence, produced bars, expected bars diff.
+  - 3) Partial outage (DB write failure mid-stream).
+    - Component: orchestrator event write path.
+    - Pass: kill switch file written and non-zero exit (2) with explicit error event.
+    - Artifacts: kill switch contents, exit code, tail logs, DB row count pre/post failure.
+    - EVIDENCE: `/tests/test_orchestrator_storage_integration.py:64-109` and orchestrator write-failure path.
