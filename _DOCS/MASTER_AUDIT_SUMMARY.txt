@@ -60,7 +60,7 @@
 - INGEST → NORMALIZE
   - `OKXTrade.from_raw` coerces price/size to float and normalizes timestamp string.
   - `CollectorEvent` schema: `{source,event_type,ts_utc,payload}`.
-  - Timestamp semantics: `ts_utc` is intended event time; fallback can become local current time on malformed/empty ts.
+  - Timestamp semantics: `ts_utc` is intended event time; malformed/empty values can fall back to timezone-naive local current time.
   - Idempotency key: none in-memory.
   - Ordering guarantee: none.
   - EVIDENCE: `/src/ravebear_monolith/collectors/okx/schemas.py`; `/src/ravebear_monolith/collectors/base.py`.
@@ -106,7 +106,7 @@
   - Symptom: OHLC values may be deterministic but bars land in wrong second.
   - Root cause chain: processor floors `event.ts_ms` (storage timestamp) for bucket, not `trade_ts_ms`; delayed delivery shifts trade into later bucket.
   - Code anchors: `/src/ravebear_monolith/processors/okx/trades_to_bars_1s.py:147-161`.
-  - Detection: invariant check `abs(bucket_ts_ms - trade_ts_ms_floor) == 0` should hold for near-real-time stream.
+  - Detection: invariant check `bucket_ts_ms == trade_ts_ms_floor` should hold for near-real-time stream.
   - Mitigation: bucket by `trade_ts_ms` when present; only fallback to `event.ts_ms`.
   - EVIDENCE: bucket computation line 160.
 - 2) Replay with different cursor double-counts bars. Score: 4 × 5.
@@ -118,7 +118,7 @@
   - EVIDENCE: explicit ON CONFLICT summation.
 - 3) Timestamp parse fallback silently uses local wall-clock time. Score: 3 × 5.
   - Symptom: events inserted at current host time, causing replay ordering corruption and apparent data jumps.
-  - Root cause chain: `EventSink._parse_timestamp` catches `ValueError` and returns `datetime.now().timestamp()` (naive local time).
+  - Root cause chain: `EventSink._parse_timestamp` catches `ValueError` and returns `datetime.now().timestamp()` from a timezone-naive local datetime.
   - Anchors: `/src/ravebear_monolith/storage/event_sink.py:192-203`.
   - Detection: log/metric count of parse failures; invariant `abs(parsed_ts - payload.trade_ts_ms)` threshold alarm.
   - Mitigation: fail closed on parse error or use timezone-aware UTC fallback with explicit error metric.
@@ -245,7 +245,7 @@
     - Artifacts: attempted inserts, final row count, duplicate ID list.
     - EVIDENCE: `/src/ravebear_monolith/storage/event_sink.py`.
 - 5 invariants / property tests:
-  - 1) Candle invariant: `low <= min(open,close) <= high` and `high >= max(open,close)` for every bar.
+  - 1) Candle invariant: `low <= open <= high`, `low <= close <= high`, and `low <= high` for every bar.
   - 2) Candle invariant: `volume >= 0`, `trade_count >= 0`, and `trade_count == 0 => volume == 0` (if zero-trade bars are ever emitted).
   - 3) Timestamp invariant: all persisted event `ts` are integer ms and within configured epoch window.
   - 4) Timestamp invariant: `bars_1s.ts_ms % 1000 == 0` and monotonic non-decreasing per symbol.
