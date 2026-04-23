@@ -1,0 +1,3 @@
+## 2026-04-23 - O(1) Incremental OHLCV Aggregation
+**Learning:** During real-time processing of high-frequency trades, appending trade records to a list and deferring OHLCV computation (including sorting) until bucket flush creates a costly O(N log N) spike. Sorting all trades within a 1-second bucket upon rollover caused an unnecessary performance penalty when trade volume surged.
+**Action:** Replace `list.append()` with incremental, O(1) state variables (`high`, `low`, `volume`, and deterministic tracking of `open`/`close` using min/max sort keys). Compute the bar iteratively as trades arrive to eliminate the sorting bottleneck entirely.
