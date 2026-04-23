@@ -29,25 +29,51 @@ class TradeRecord:
 class BucketState:
     """In-memory state for a single 1-second bucket.
 
-    Collects trades and computes deterministic OHLC based on sorted order.
+    Maintains OHLC state incrementally as trades are added, ensuring
+    O(1) operations instead of O(N log N) sorting on flush.
     """
 
     def __init__(self, symbol: str, ts_ms: int) -> None:
         self.symbol = symbol
         self.ts_ms = ts_ms  # Bucket start (floored to 1s)
-        self._trades: list[TradeRecord] = []
+        self._trade_count = 0
+        self._volume = 0.0
+        self._high_price = float("-inf")
+        self._low_price = float("inf")
+
+        # Track open/close deterministically
+        self._min_sort_key: tuple[int, str] | None = None
+        self._max_sort_key: tuple[int, str] | None = None
+        self._open_price = 0.0
+        self._close_price = 0.0
 
     def add_trade(self, trade: TradeRecord) -> None:
-        """Add a trade to the bucket."""
-        self._trades.append(trade)
+        """Add a trade to the bucket, updating OHLC in O(1)."""
+        self._trade_count += 1
+        self._volume += trade.size
+
+        if trade.price > self._high_price:
+            self._high_price = trade.price
+        if trade.price < self._low_price:
+            self._low_price = trade.price
+
+        # Update Open
+        if self._min_sort_key is None or trade.sort_key < self._min_sort_key:
+            self._min_sort_key = trade.sort_key
+            self._open_price = trade.price
+
+        # Update Close
+        if self._max_sort_key is None or trade.sort_key > self._max_sort_key:
+            self._max_sort_key = trade.sort_key
+            self._close_price = trade.price
 
     @property
     def trade_count(self) -> int:
         """Number of trades in bucket."""
-        return len(self._trades)
+        return self._trade_count
 
     def to_bar(self) -> Bar1s:
-        """Convert bucket state to Bar1s with deterministic OHLC.
+        """Convert bucket state to Bar1s with pre-computed deterministic OHLC.
 
         OPEN = price of trade with min(sort_key)
         CLOSE = price of trade with max(sort_key)
@@ -55,27 +81,18 @@ class BucketState:
         LOW = min(price)
         VOLUME = sum(size)
         """
-        if not self._trades:
+        if self._trade_count == 0:
             raise ValueError("Cannot create bar from empty bucket")
-
-        # Sort trades by (trade_ts_ms, event_id)
-        sorted_trades = sorted(self._trades, key=lambda t: t.sort_key)
-
-        open_price = sorted_trades[0].price
-        close_price = sorted_trades[-1].price
-        high_price = max(t.price for t in self._trades)
-        low_price = min(t.price for t in self._trades)
-        volume = sum(t.size for t in self._trades)
 
         return Bar1s(
             symbol=self.symbol,
             ts_ms=self.ts_ms,
-            open=open_price,
-            high=high_price,
-            low=low_price,
-            close=close_price,
-            volume=volume,
-            trade_count=len(self._trades),
+            open=self._open_price,
+            high=self._high_price,
+            low=self._low_price,
+            close=self._close_price,
+            volume=self._volume,
+            trade_count=self._trade_count,
         )
 
 
