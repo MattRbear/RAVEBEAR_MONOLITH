@@ -63,9 +63,20 @@ class BucketState:
 
         open_price = sorted_trades[0].price
         close_price = sorted_trades[-1].price
-        high_price = max(t.price for t in self._trades)
-        low_price = min(t.price for t in self._trades)
-        volume = sum(t.size for t in self._trades)
+
+        # Performance optimization: Single pass for OHLCV computation
+        # Reduces iteration from 3x to 1x over the bucket's trades
+        high_price = self._trades[0].price
+        low_price = self._trades[0].price
+        volume = 0.0
+
+        for t in self._trades:
+            p = t.price
+            if p > high_price:
+                high_price = p
+            if p < low_price:
+                low_price = p
+            volume += t.size
 
         return Bar1s(
             symbol=self.symbol,
